@@ -1093,6 +1093,32 @@ func TestRaft_RaftNode_LeaderChangeChannel(t *testing.T) {
 		testutil.AssertEqual(t, types.NodeID(fmt.Sprintf("node%d", events-1)), last)
 	})
 
+	t.Run("retries until the event is delivered when there is nothing to drop", func(t *testing.T) {
+		r, _, _, _, _, _, _, _ := createTestRaftNode(t)
+		// An unbuffered channel can neither accept the send nor yield an event to drop.
+		r.leaderEventCh = make(chan types.NodeID)
+
+		published := make(chan struct{})
+		go func() {
+			r.publishLeaderChange("node2")
+			close(published)
+		}()
+		time.Sleep(10 * time.Millisecond)
+
+		select {
+		case got := <-r.leaderEventCh:
+			testutil.AssertEqual(t, types.NodeID("node2"), got)
+		case <-time.After(time.Second):
+			t.Fatal("event was not delivered to the application")
+		}
+
+		select {
+		case <-published:
+		case <-time.After(time.Second):
+			t.Fatal("publishLeaderChange did not return after delivering the event")
+		}
+	})
+
 	t.Run("closes when the handler stops", func(t *testing.T) {
 		r, _, _, _, _, _, _, _ := createTestRaftNode(t)
 		done := runHandler(r)
