@@ -364,10 +364,7 @@ func (em *electionManager) ResetTimerOnHeartbeat() {
 
 	em.resetElectionTimeoutPeriod()
 
-	em.logger.Debugw("Election timeout period reset on heartbeat",
-		"nodeID", em.id,
-		"randomizedPeriod", em.randomizedPeriod,
-		"elapsed", em.electionElapsed)
+	em.logger.Debugw("Election timeout period reset on heartbeat", "nodeID", em.id)
 }
 
 // Tick advances the election timer. If it expires, a new election may start.
@@ -553,12 +550,13 @@ func (em *electionManager) processVoteReply(
 	if !reply.VoteGranted {
 		em.splitVoteDetector.mu.Lock()
 		em.splitVoteDetector.electionAttempts++
+		totalAttempts := em.splitVoteDetector.electionAttempts
 		em.splitVoteDetector.mu.Unlock()
 
 		em.logger.Debugw("Vote rejected, incrementing election attempts",
 			"from", fromPeerID,
 			"nodeID", em.id,
-			"totalAttempts", em.splitVoteDetector.electionAttempts)
+			"totalAttempts", totalAttempts)
 	}
 
 	em.recordVote(fromPeerID, reply.VoteGranted)
@@ -575,7 +573,6 @@ func (em *electionManager) processVoteReply(
 		em.logger.Infow("Vote quorum achieved, becoming leader",
 			"nodeID", em.id,
 			"term", voteTerm,
-			"voteCount", em.voteCount,
 			"quorumSize", em.quorumSize)
 
 		ctx, cancel := context.WithTimeout(context.Background(), stateTransitionTimeout)
@@ -665,7 +662,6 @@ func (em *electionManager) defaultStartElection(ctx context.Context) {
 		em.logger.Infow("Waiting for vote replies to achieve quorum",
 			"nodeID", em.id,
 			"term", newTerm,
-			"currentVotes", em.voteCount,
 			"neededVotes", em.quorumSize)
 	}
 }
