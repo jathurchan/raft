@@ -98,7 +98,7 @@ type gRPCNetworkManager struct {
 
 // peerConnection encapsulates the state for a gRPC connection to a single Raft peer.
 type peerConnection struct {
-	mu         sync.Mutex // Protects conn and client fields during reset
+	mu         sync.Mutex // Protects conn, client, lastError, and lastActive
 	id         types.NodeID
 	addr       string
 	client     proto.RaftClient
@@ -107,6 +107,30 @@ type peerConnection struct {
 	lastError  error
 	lastActive time.Time
 	connected  atomic.Bool
+}
+
+// rpcClient returns the current gRPC client, which a reconnect can replace.
+func (c *peerConnection) rpcClient() proto.RaftClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.client
+}
+
+// recordSuccess marks the connection healthy after a successful RPC.
+func (c *peerConnection) recordSuccess(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastActive = now
+	c.lastError = nil
+	c.connected.Store(true)
+}
+
+// recordFailure marks the connection unhealthy after a failed RPC.
+func (c *peerConnection) recordFailure(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastError = err
+	c.connected.Store(false)
 }
 
 // GRPCNetworkManagerOptions configures a gRPCNetworkManager.
@@ -439,7 +463,7 @@ func (nm *gRPCNetworkManager) SendRequestVote(
 		args.IsPreVote,
 	)
 
-	resp, err := client.client.RequestVote(ctx, req)
+	resp, err := client.rpcClient().RequestVote(ctx, req)
 	latency := nm.clock.Since(startTime)
 	nm.metrics.ObserveHistogram(
 		"grpc_client_rpc_latency_seconds",
@@ -462,8 +486,7 @@ func (nm *gRPCNetworkManager) SendRequestVote(
 			"latency",
 			latency,
 		)
-		client.lastError = err
-		client.connected.Store(false)
+		client.recordFailure(err)
 		nm.metrics.IncCounter(
 			"grpc_client_rpc_failures_total",
 			"rpc",
@@ -474,9 +497,7 @@ func (nm *gRPCNetworkManager) SendRequestVote(
 		return nil, formatGRPCError(err)
 	}
 
-	client.lastActive = nm.clock.Now()
-	client.connected.Store(true)
-	client.lastError = nil
+	client.recordSuccess(nm.clock.Now())
 
 	reply := &types.RequestVoteReply{
 		Term:        types.Term(resp.Term),
@@ -574,7 +595,7 @@ func (nm *gRPCNetworkManager) SendAppendEntries(
 		nm.logger.Debugw("Sending Heartbeat", "target", target, "term", args.Term, "prev_idx", args.PrevLogIndex, "prev_term", args.PrevLogTerm)
 	}
 
-	resp, err := client.client.AppendEntries(ctx, req)
+	resp, err := client.rpcClient().AppendEntries(ctx, req)
 	latency := nm.clock.Since(startTime)
 	nm.metrics.ObserveHistogram(
 		"grpc_client_rpc_latency_seconds",
@@ -601,8 +622,7 @@ func (nm *gRPCNetworkManager) SendAppendEntries(
 			"latency",
 			latency,
 		)
-		client.lastError = err
-		client.connected.Store(false)
+		client.recordFailure(err)
 		nm.metrics.IncCounter(
 			"grpc_client_rpc_failures_total",
 			"rpc",
@@ -613,9 +633,7 @@ func (nm *gRPCNetworkManager) SendAppendEntries(
 		return nil, formatGRPCError(err)
 	}
 
-	client.lastActive = nm.clock.Now()
-	client.connected.Store(true)
-	client.lastError = nil
+	client.recordSuccess(nm.clock.Now())
 
 	reply := &types.AppendEntriesReply{
 		Term:          types.Term(resp.Term),
@@ -723,7 +741,7 @@ func (nm *gRPCNetworkManager) SendInstallSnapshot(
 		dataSize,
 	)
 
-	resp, err := client.client.InstallSnapshot(ctx, req)
+	resp, err := client.rpcClient().InstallSnapshot(ctx, req)
 	latency := nm.clock.Since(startTime)
 	nm.metrics.ObserveHistogram(
 		"grpc_client_rpc_latency_seconds",
@@ -746,8 +764,7 @@ func (nm *gRPCNetworkManager) SendInstallSnapshot(
 			"latency",
 			latency,
 		)
-		client.lastError = err
-		client.connected.Store(false)
+		client.recordFailure(err)
 		nm.metrics.IncCounter(
 			"grpc_client_rpc_failures_total",
 			"rpc",
@@ -758,9 +775,7 @@ func (nm *gRPCNetworkManager) SendInstallSnapshot(
 		return nil, formatGRPCError(err)
 	}
 
-	client.lastActive = nm.clock.Now()
-	client.connected.Store(true)
-	client.lastError = nil
+	client.recordSuccess(nm.clock.Now())
 
 	reply := &types.InstallSnapshotReply{
 		Term: types.Term(resp.Term),
@@ -812,6 +827,9 @@ func (nm *gRPCNetworkManager) PeerStatus(peer types.NodeID) (types.PeerConnectio
 		}
 		return types.PeerConnectionStatus{Connected: false}, nil
 	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
 
 	return types.PeerConnectionStatus{
 		Connected:   client.connected.Load(),
