@@ -391,7 +391,8 @@ func (em *electionManager) Tick(ctx context.Context) {
 	shouldTriggerElection := func() bool {
 		_, role, _ := em.stateMgr.GetState()
 
-		if role != types.RoleFollower {
+		// Candidates keep counting so that a split vote can be retried.
+		if role == types.RoleLeader {
 			return false
 		}
 
@@ -451,15 +452,16 @@ func (em *electionManager) defaultHandleElectionTimeout(ctx context.Context) {
 		"role", role.String(),
 		"electionCount", electionCount)
 
-	if role != types.RoleFollower {
-		em.logger.Debugw("Not starting election: not a follower",
+	if role == types.RoleLeader {
+		em.logger.Debugw("Not starting election: already leader",
 			"nodeID", em.id, "role", role.String())
 		em.resetElectionTimeoutPeriod()
 		return
 	}
 
+	// A candidate reaching this point has timed out, so its election is abandoned.
 	currentState := ElectionState(em.electionState.Load())
-	if currentState != ElectionStateIdle {
+	if role == types.RoleFollower && currentState != ElectionStateIdle {
 		em.logger.Debugw("Election timeout ignored: election already in progress",
 			"nodeID", em.id, "currentState", currentState)
 		em.resetElectionTimeoutPeriod()
@@ -472,6 +474,7 @@ func (em *electionManager) defaultHandleElectionTimeout(ctx context.Context) {
 	em.trackElectionAttempt(currentTerm)
 
 	em.electionState.Store(int32(ElectionStateVoting))
+	em.resetElectionTimeoutPeriod()
 	em.startElection(ctx)
 }
 
