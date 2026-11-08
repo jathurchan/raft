@@ -1020,6 +1020,30 @@ func TestNetworkManager_SendInstallSnapshot_PreservesChunkFields(t *testing.T) {
 	testutil.AssertTrue(t, received.MoreChunks, "MoreChunks should cross the wire")
 }
 
+func TestNetworkManager_GetOrCreatePeerClientLocked_ReusesConnection(t *testing.T) {
+	nm, _, _, _ := setupDefaultNetworkManager(t, "node1-reuse", "localhost:0", nil)
+	testutil.AssertNoError(t, nm.Start())
+	defer func() { _ = nm.Stop() }()
+
+	addr, cleanup := setupPeerServer(t, "localhost:0", &mockRPCHandler{})
+	defer cleanup()
+
+	peer := types.NodeID("peer1-reuse")
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
+	nm.peers[peer] = PeerConfig{ID: peer, Address: addr}
+
+	first, err := nm.getOrCreatePeerClientLocked(context.Background(), peer)
+	testutil.AssertNoError(t, err)
+	conn := first.conn
+
+	second, err := nm.getOrCreatePeerClientLocked(context.Background(), peer)
+	testutil.AssertNoError(t, err)
+
+	testutil.AssertTrue(t, first == second, "the same client should be returned")
+	testutil.AssertTrue(t, second.conn == conn, "the existing connection should be kept")
+}
+
 func TestNetworkManager_FailedRPCKeepsConnection(t *testing.T) {
 	nm, _, _, _ := setupDefaultNetworkManager(t, "node1-keep", "localhost:0", nil)
 	testutil.AssertNoError(t, nm.Start())
