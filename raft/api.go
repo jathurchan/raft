@@ -52,13 +52,15 @@ type Raft interface {
 	// ReadIndex issues a linearizable read request, returning the commit index at the time the request is processed.
 	//
 	// The caller must ensure the application's state machine reflects at least the returned commit index
-	// before reading any application state for linearizability.
+	// before reading any application state for linearizability. Compare it with Status().LastApplied,
+	// because empty leader entries occupy log indexes but are not delivered to the Applier.
 	//
 	// This operation can be significantly faster when the leader holds a valid lease (configurable via FeatureFlags),
 	// potentially avoiding a full quorum round-trip.
 	//
 	// Errors:
 	//   - ErrNotLeader if the node is not leader.
+	//   - ErrUnavailable if a new leader has not yet committed an entry in its term.
 	//   - ErrTimeout if the operation times out.
 	//   - ErrShuttingDown if the node is shutting down.
 	ReadIndex(ctx context.Context) (committedIndex types.Index, err error)
