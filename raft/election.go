@@ -688,18 +688,21 @@ func (em *electionManager) recordElectionFailure() {
 
 // becomeLeader transitions to leader role with enhanced logging
 func (em *electionManager) becomeLeader(ctx context.Context, term types.Term) {
-	em.mu.Lock()
-	defer em.mu.Unlock()
+	stepDown := false
 
+	em.mu.Lock()
 	currentTerm, role, _ := em.stateMgr.GetStateUnsafe()
+	defer func() {
+		em.mu.Unlock()
+		// BecomeFollower takes the shared mutex, so it must run after the release.
+		if stepDown {
+			em.stateMgr.BecomeFollower(context.Background(), currentTerm, unknownNodeID)
+		}
+	}()
 
 	if em.isShutdown.Load() {
 		em.logger.Debugw("Cannot become leader: node shutting down", "nodeID", em.id)
-		em.stateMgr.BecomeFollower(
-			context.Background(),
-			currentTerm,
-			unknownNodeID,
-		)
+		stepDown = true
 		em.resetElectionState("shutting down")
 		return
 	}
@@ -733,7 +736,7 @@ func (em *electionManager) becomeLeader(ctx context.Context, term types.Term) {
 			"nodeID", em.id,
 			"term", currentTerm)
 		// The state manager failed, so we should step down.
-		em.stateMgr.BecomeFollower(context.Background(), currentTerm, unknownNodeID)
+		stepDown = true
 		em.resetElectionState("failed to become leader")
 		em.recordElectionFailure()
 		return
