@@ -4,8 +4,8 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/jathurchan/raftlock/testutil"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/testutil"
+	"github.com/jathurchan/raft/types"
 )
 
 // Sample data for tests

@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package raft.proto;
 
-option go_package = "github.com/jathurchan/raftlock/raft/proto";
+option go_package = "github.com/jathurchan/raft/raft/proto";
 
 // LogEntry represents a single command entry in the Raft replicated log.
 message LogEntry {

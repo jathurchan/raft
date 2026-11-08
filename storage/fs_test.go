@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jathurchan/raftlock/testutil"
+	"github.com/jathurchan/raft/testutil"
 )
 
 // TestFileSystemBasics tests basic filesystem operations like reading, writing, and file existence

@@ -3,7 +3,7 @@ package raft
 import (
 	"context"
 
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/types"
 )
 
 // Raft defines the primary application-facing interface for interacting with a Raft node.

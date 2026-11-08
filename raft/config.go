@@ -3,7 +3,7 @@ package raft
 import (
 	"time"
 
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/types"
 )
 
 // PeerConfig holds the configuration for a single peer in the Raft cluster.

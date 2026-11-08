@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jathurchan/raftlock/logger"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/types"
 )
 
 // logMetadata represents the persistent metadata for the log.

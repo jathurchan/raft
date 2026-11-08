@@ -6,9 +6,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/jathurchan/raftlock/logger"
-	"github.com/jathurchan/raftlock/storage"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/storage"
+	"github.com/jathurchan/raft/types"
 )
 
 // RaftBuilder facilitates the construction of a Raft with appropriate defaults.

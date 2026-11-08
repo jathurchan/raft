@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jathurchan/raftlock/testutil"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/testutil"
+	"github.com/jathurchan/raft/types"
 )
 
 func TestRaftMetrics_NewNoOpMetrics(t *testing.T) {
