@@ -1,6 +1,6 @@
 # Raft Consensus Module (`raft/`)
 
-The `raft` package offers a robust, custom-built implementation of the Raft consensus algorithm, tailored specifically for distributed systems requiring strong consistency and fault tolerance. Designed as the core consensus engine for RaftLock—a distributed lock service—this module enables coordination across nodes to ensure linearizable operations, making it well-suited for use cases like lock management, leader election, and configuration replication.
+The `raft` package offers a robust, custom-built implementation of the Raft consensus algorithm, tailored specifically for distributed systems requiring strong consistency and fault tolerance. Designed as a reusable consensus engine for distributed services (such as `raftlock` and `raftkv`), this module enables coordination across nodes to ensure linearizable operations, making it well-suited for use cases like lock management, key-value stores, leader election, and configuration replication.
 
 ## Overview
 
@@ -48,11 +48,11 @@ The `raft` package employs a modular architecture centered around a `raftNode` t
 ```mermaid
 graph TB
     %% Client Request Flow
-    CLIENT[Client Request] --> GRPC[gRPC API Layer]
-    GRPC --> LOCKAPI[RaftLock API]
+    CLIENT[Client Request] --> GRPC[Application API Layer]
+    GRPC --> APPAPI[Service Handler]
     
-    %% Lock Manager Integration
-    LOCKAPI --> RAFTAPI[Raft.Propose]
+    %% Application Integration
+    APPAPI --> RAFTAPI[Raft.Propose]
     RAFTAPI --> RAFTCORE[Raft Node Core]
     
     %% Raft Core Components
@@ -82,7 +82,7 @@ graph TB
     end
     
     %% Application State Machine
-    RAFTCORE --> APPLIER[Lock Manager]
+    RAFTCORE --> APPLIER[Application State Machine]
     
     %% External Dependencies
     subgraph "External Services"
@@ -117,7 +117,7 @@ graph TB
     classDef storage fill:#fce4ec,stroke:#c2185b,stroke-width:2px
     classDef external fill:#f1f8e9,stroke:#558b2f,stroke-width:2px
     
-    class CLIENT,GRPC,LOCKAPI,RESPONSE api
+    class CLIENT,GRPC,APPAPI,RESPONSE api
     class RAFTAPI,RAFTCORE,RPC raft
     class EM,RM,SM manager
     class STM,LOGM state
@@ -267,10 +267,10 @@ import (
     "strings"
     "sync"
 
-    "github.com/jathurchan/raftlock/logger"
-    "github.com/jathurchan/raftlock/raft"
-    "github.com/jathurchan/raftlock/storage"
-    "github.com/jathurchan/raftlock/types"
+    "github.com/jathurchan/raft/logger"
+    "github.com/jathurchan/raft/raft"
+    "github.com/jathurchan/raft/storage"
+    "github.com/jathurchan/raft/types"
 )
 
 // KeyValueStore is a simple state machine that maintains a key-value store

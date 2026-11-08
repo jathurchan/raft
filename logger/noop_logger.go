@@ -1,6 +1,6 @@
 package logger
 
-import "github.com/jathurchan/raftlock/types"
+import "github.com/jathurchan/raft/types"
 
 // NoOpLogger is a Logger implementation that silently discards all log messages.
 // It is useful for testing, benchmarking, or disabling logging entirely.

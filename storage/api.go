@@ -3,7 +3,7 @@ package storage
 import (
 	"context"
 
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/types"
 )
 
 // Storage defines the interface for persisting Raft state, log entries, and snapshots.

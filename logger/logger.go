@@ -1,7 +1,7 @@
 package logger
 
 import (
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/types"
 )
 
 // Logger defines an interface for structured, context-aware logging used in a Raft implementation.

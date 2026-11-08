@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jathurchan/raftlock/logger"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/types"
 )
 
 // snapshotWriteHooks provides lifecycle callbacks during snapshot writing.

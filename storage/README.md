@@ -1,8 +1,8 @@
-# RaftLock Storage Package (`storage/`)
+# Raft Storage Package (`storage/`)
 
 ## 1\. Overview
 
-The **`storage`** package provides a durable, thread-safe, and crash-resilient persistence layer for RaftLock. It is responsible for storing all critical Raft data on the local filesystem, including the persistent state (term and vote), log entries, and snapshots.
+The **`storage`** package provides a durable, thread-safe, and crash-resilient persistence layer for Raft. It is responsible for storing all critical Raft data on the local filesystem, including the persistent state (term and vote), log entries, and snapshots.
 
 Designed for high performance and reliability, this package uses atomic file operations, fine-grained locking, and a self-healing recovery mechanism to ensure data consistency, even in the event of sudden crashes or concurrent access. It serves as the foundation for the Raft consensus algorithm, guaranteeing that state can be reliably recovered after a node restart.
 
@@ -212,9 +212,9 @@ import (
     "log"
     "os"
     
-    "github.com/jathurchan/raftlock/logger"
-    "github.com/jathurchan/raftlock/storage"
-    "github.com/jathurchan/raftlock/types"
+    "github.com/jathurchan/raft/logger"
+    "github.com/jathurchan/raft/storage"
+    "github.com/jathurchan/raft/types"
 )
 
 func main() {

@@ -6,9 +6,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/jathurchan/raftlock/logger"
-	"github.com/jathurchan/raftlock/testutil"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/testutil"
+	"github.com/jathurchan/raft/types"
 )
 
 func TestDefaultMetadataService_LoadMetadata(t *testing.T) {

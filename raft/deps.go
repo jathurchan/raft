@@ -3,8 +3,8 @@ package raft
 import (
 	"fmt"
 
-	"github.com/jathurchan/raftlock/logger"
-	"github.com/jathurchan/raftlock/storage"
+	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/storage"
 )
 
 // Dependencies bundles the external components required by a Raft node instance.

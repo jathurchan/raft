@@ -3,7 +3,7 @@ package raft
 import (
 	"time"
 
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/types"
 )
 
 // Metrics defines an interface for recording Raft metrics.

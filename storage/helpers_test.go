@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/jathurchan/raftlock/testutil"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/testutil"
+	"github.com/jathurchan/raft/types"
 )
 
 // TestAtomicWriteSuccess tests that atomicWrite successfully writes data atomically

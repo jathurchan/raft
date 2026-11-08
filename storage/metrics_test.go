@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jathurchan/raftlock/testutil"
+	"github.com/jathurchan/raft/testutil"
 )
 
 func TestMetricsToMap(t *testing.T) {

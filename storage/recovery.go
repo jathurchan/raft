@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jathurchan/raftlock/logger"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/types"
 )
 
 // recoveryMode defines the level of strictness to apply during recovery.

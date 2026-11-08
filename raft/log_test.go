@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jathurchan/raftlock/logger"
-	"github.com/jathurchan/raftlock/storage"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/storage"
+	"github.com/jathurchan/raft/types"
 )
 
 func setupLogManager(t *testing.T) (*logManager, *mockStorage, *mockMetrics) {

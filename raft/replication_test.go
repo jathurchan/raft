@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jathurchan/raftlock/logger"
-	"github.com/jathurchan/raftlock/testutil"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/testutil"
+	"github.com/jathurchan/raft/types"
 )
 
 // Test helper for creating a properly configured replication manager

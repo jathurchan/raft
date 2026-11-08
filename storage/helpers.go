@@ -9,7 +9,7 @@ import (
 	"slices"
 	"sync/atomic"
 
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/types"
 )
 
 // atomicWrite safely writes data to a file atomically.
