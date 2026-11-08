@@ -1336,8 +1336,9 @@ func (sm *snapshotManager) restoreSnapshot(
 		return fmt.Errorf("applier.RestoreSnapshot failed: %w", err)
 	}
 
-	sm.stateMgr.UpdateLastApplied(meta.LastIncludedIndex)
+	// Commit index first, since lastApplied may not exceed it.
 	sm.stateMgr.UpdateCommitIndex(meta.LastIncludedIndex)
+	sm.stateMgr.UpdateLastApplied(meta.LastIncludedIndex)
 
 	duration := sm.clock.Now().Sub(start)
 	sm.logger.Infow("Snapshot restored and Raft state updated successfully",
