@@ -359,6 +359,10 @@ func (rm *replicationManager) Propose(
 		return 0, 0, false, ErrShuttingDown
 	}
 
+	// Held across index assignment and append so concurrent callers get distinct indexes.
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
 	currentTerm, role, leaderID := rm.stateMgr.GetStateUnsafe()
 	if role != types.RoleLeader || leaderID != rm.id {
 		rm.logger.Debugw("Propose rejected: not leader",

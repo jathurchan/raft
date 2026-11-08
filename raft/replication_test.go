@@ -707,6 +707,42 @@ func TestReplicationManager_HasValidLease(t *testing.T) {
 	})
 }
 
+func TestReplicationManager_Propose_ConcurrentCallersGetUniqueIndexes(t *testing.T) {
+	rm, logMgr, _, _, _, _ := setupTestReplicationManager(t)
+	defer rm.Stop()
+
+	logMgr.appendEntriesUnsafeFunc = func(ctx context.Context, entries []types.LogEntry) error {
+		time.Sleep(100 * time.Microsecond)
+		return nil
+	}
+
+	const callers, perCaller = 16, 25
+
+	var mu sync.Mutex
+	seen := make(map[types.Index]int)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range perCaller {
+				index, _, isLeader, err := rm.Propose(context.Background(), []byte("cmd"))
+				testutil.AssertNoError(t, err)
+				testutil.AssertTrue(t, isLeader, "node should remain leader")
+				mu.Lock()
+				seen[index]++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	testutil.AssertEqual(t, callers*perCaller, len(seen))
+	for index, count := range seen {
+		testutil.AssertEqual(t, 1, count, "index %d was assigned more than once", index)
+	}
+}
+
 func TestReplicationManager_VerifyLeadershipAndGetCommitIndex(t *testing.T) {
 	t.Run("FastPathWithValidLease", func(t *testing.T) {
 		rm, _, stateMgr, _, _, clock := setupTestReplicationManager(t)
