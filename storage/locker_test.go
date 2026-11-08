@@ -242,3 +242,42 @@ func TestRWOperationLocker_CoversCtxErrAfterLock(t *testing.T) {
 		"Function should NOT be called if ctx.Err() is set after lock acquired",
 	)
 }
+
+func TestRWOperationLocker_ReleasesLockAfterAbandonedAcquire(t *testing.T) {
+	for _, opType := range []string{"read", "write"} {
+		t.Run(opType, func(t *testing.T) {
+			lock := &sync.RWMutex{}
+			options := DefaultFileStorageOptions()
+			options.Features.EnableLockTimeout = true
+			options.LockTimeout = 5
+			locker := newRWOperationLocker(lock, logger.NewNoOpLogger(), options, &atomic.Uint64{})
+
+			// Block the acquire so that the caller gives up while it is still waiting.
+			lock.Lock()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+
+			noop := func() error { return nil }
+			var err error
+			if opType == "read" {
+				err = locker.DoRead(ctx, noop)
+			} else {
+				err = locker.DoWrite(ctx, noop)
+			}
+			if err == nil {
+				t.Fatal("expected the acquire to be abandoned")
+			}
+			lock.Unlock()
+			time.Sleep(20 * time.Millisecond) // Let the abandoned acquire finish
+
+			deadline := time.Now().Add(2 * time.Second)
+			for !lock.TryLock() {
+				if time.Now().After(deadline) {
+					t.Fatal("abandoned acquire left the lock held")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			lock.Unlock()
+		})
+	}
+}
