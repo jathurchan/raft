@@ -870,6 +870,34 @@ func TestReplicationManager_VerifyLeadership_RequiresCommitInCurrentTerm(t *test
 	})
 }
 
+func TestReplicationManager_VerifyLeadership_CountsLaggingPeers(t *testing.T) {
+	newReply := func(term types.Term) func(context.Context, types.NodeID, *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+		return func(ctx context.Context, target types.NodeID, args *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+			return &types.AppendEntriesReply{Term: term, Success: false}, nil
+		}
+	}
+
+	t.Run("LogMismatchInCurrentTermConfirmsLeadership", func(t *testing.T) {
+		rm, _, _, networkMgr, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		networkMgr.setSendAppendEntriesFunc(newReply(1))
+
+		_, err := rm.VerifyLeadershipAndGetCommitIndex(context.Background())
+
+		testutil.AssertNoError(t, err)
+	})
+
+	t.Run("OlderTermDoesNotConfirmLeadership", func(t *testing.T) {
+		rm, _, _, networkMgr, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		networkMgr.setSendAppendEntriesFunc(newReply(0))
+
+		_, err := rm.VerifyLeadershipAndGetCommitIndex(context.Background())
+
+		testutil.AssertError(t, err)
+	})
+}
+
 func TestReplicationManager_VerifyLeadershipAndGetCommitIndex(t *testing.T) {
 	t.Run("FastPathWithValidLease", func(t *testing.T) {
 		rm, _, stateMgr, _, _, clock := setupTestReplicationManager(t)
