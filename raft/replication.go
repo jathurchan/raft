@@ -10,6 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/jathurchan/raft/logger"
 	"github.com/jathurchan/raft/types"
 )
@@ -1430,7 +1433,9 @@ func (rm *replicationManager) handleAppendError(
 
 	if peerState, exists := rm.peerStates[peerID]; exists {
 		peerState.IsActive = false
-		peerState.ConsecutiveFailures++
+		if isConnectionFailure(err) {
+			peerState.ConsecutiveFailures++
+		}
 
 		// If we have multiple consecutive failures, try to reset the connection
 		if peerState.ConsecutiveFailures > 3 { // Threshold for resetting connection
@@ -1458,6 +1463,14 @@ func (rm *replicationManager) handleAppendError(
 	} else {
 		rm.metrics.ObservePeerReplication(peerID, false, ReplicationResultFailed)
 	}
+}
+
+// isConnectionFailure reports whether an RPC error suggests the connection is unhealthy.
+// Cancellations come from this node, and handler errors prove the peer is reachable.
+func isConnectionFailure(err error) bool {
+	return !errors.Is(err, context.Canceled) &&
+		!errors.Is(err, ErrShuttingDown) &&
+		status.Code(err) != codes.Internal
 }
 
 // handleAppendReply processes successful AppendEntries replies
