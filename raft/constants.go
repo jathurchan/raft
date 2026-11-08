@@ -77,6 +77,10 @@ const (
 	DefaultServerMaxConnectionAgeGrace = 5 * time.Second
 )
 
+// Capacity of the leader change channels. When the application falls behind,
+// its oldest notifications are dropped so that the newest is always available.
+const leaderEventBufferSize = 16
+
 const (
 	// Base interval between Raft ticks; used for election and heartbeat timeouts.
 	NominalTickInterval = 100 * time.Millisecond
