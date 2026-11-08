@@ -173,6 +173,20 @@ func validateReplicationManagerDeps(deps ReplicationManagerDeps) error {
 	return nil
 }
 
+// pendingProposal is a command waiting to be appended to the log.
+type pendingProposal struct {
+	command []byte
+	done    chan proposalResult
+}
+
+// proposalResult is the outcome of appending a pending proposal.
+type proposalResult struct {
+	index    types.Index
+	term     types.Term
+	isLeader bool
+	err      error
+}
+
 // replicationManager is the concrete implementation of the ReplicationManager interface
 type replicationManager struct {
 	mu         *sync.RWMutex // Shared Raft mutex protecting state fields
@@ -200,6 +214,10 @@ type replicationManager struct {
 	lastQuorumHeartbeat time.Time     // Time of last successful quorum heartbeat
 
 	readReadyTerm atomic.Uint64 // Latest term known to have committed an entry of its own
+
+	proposeMu       sync.Mutex         // Protects proposeQueue and proposeFlushing
+	proposeQueue    []*pendingProposal // Proposals waiting to be appended
+	proposeFlushing bool               // Whether a flush is currently running
 
 	applyNotifyCh  chan<- struct{} // Signals Raft core to apply newly committed log entries
 	notifyCommitCh chan struct{}   // Triggers commit index evaluation after replication events
@@ -365,7 +383,68 @@ func (rm *replicationManager) Propose(
 		return 0, 0, false, ErrShuttingDown
 	}
 
-	// Held across index assignment and append so concurrent callers get distinct indexes.
+	p := &pendingProposal{command: command, done: make(chan proposalResult, 1)}
+
+	// The first caller to find no flush running appends on behalf of later arrivals,
+	// so concurrent proposals share one log write and fsync.
+	rm.proposeMu.Lock()
+	rm.proposeQueue = append(rm.proposeQueue, p)
+	shouldFlush := !rm.proposeFlushing
+	rm.proposeFlushing = true
+	rm.proposeMu.Unlock()
+
+	if shouldFlush {
+		rm.flushProposals()
+	}
+
+	select {
+	case result := <-p.done:
+		return result.index, result.term, result.isLeader, result.err
+	case <-ctx.Done():
+		return 0, 0, false, fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+	}
+}
+
+// flushProposals appends one batch of queued proposals. Remaining proposals are
+// handed to a new goroutine so that this caller can return with its own result.
+func (rm *replicationManager) flushProposals() {
+	rm.proposeMu.Lock()
+	batchSize := min(len(rm.proposeQueue), maxProposalBatchSize)
+	batch := rm.proposeQueue[:batchSize:batchSize]
+	rm.proposeQueue = rm.proposeQueue[batchSize:]
+	rm.proposeMu.Unlock()
+
+	entries, term, isLeader, err := rm.appendProposalBatch(batch)
+	if err == nil {
+		go rm.replicateToAllPeers(term, false)
+	}
+
+	for i, p := range batch {
+		result := proposalResult{term: term, isLeader: isLeader, err: err}
+		if err == nil {
+			result.index = entries[i].Index
+		}
+		p.done <- result
+	}
+
+	rm.proposeMu.Lock()
+	more := len(rm.proposeQueue) > 0
+	if !more {
+		rm.proposeQueue = nil
+		rm.proposeFlushing = false
+	}
+	rm.proposeMu.Unlock()
+
+	if more {
+		go rm.flushProposals()
+	}
+}
+
+// appendProposalBatch assigns consecutive log indexes to the batch and appends it.
+func (rm *replicationManager) appendProposalBatch(
+	batch []*pendingProposal,
+) ([]types.LogEntry, types.Term, bool, error) {
+	// Held across index assignment and append so that indexes stay unique.
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -375,40 +454,38 @@ func (rm *replicationManager) Propose(
 			"role", role.String(),
 			"term", currentTerm,
 			"leaderID", leaderID)
-		return 0, currentTerm, false, ErrNotLeader
+		return nil, currentTerm, false, ErrNotLeader
 	}
 
-	// Get current log state to determine the next index
 	lastIndex := rm.logMgr.GetLastIndexUnsafe()
-	nextIndex := lastIndex + 1
 
-	// Create the log entry
-	entry := types.LogEntry{
-		Index:   nextIndex,
-		Term:    currentTerm,
-		Command: command,
+	entries := make([]types.LogEntry, len(batch))
+	for i, p := range batch {
+		entries[i] = types.LogEntry{
+			Index:   lastIndex + types.Index(i) + 1,
+			Term:    currentTerm,
+			Command: p.command,
+		}
 	}
 
-	appendCtx, cancel := context.WithTimeout(ctx, defaultLogFetchTimeout)
+	appendCtx, cancel := context.WithTimeout(context.Background(), defaultLogFetchTimeout)
 	defer cancel()
 
-	err = rm.logMgr.AppendEntriesUnsafe(appendCtx, []types.LogEntry{entry})
-	if err != nil {
-		rm.logger.Errorw("Failed to append proposed entry",
+	if err := rm.logMgr.AppendEntriesUnsafe(appendCtx, entries); err != nil {
+		rm.logger.Errorw("Failed to append proposed entries",
 			"error", err,
-			"index", nextIndex,
+			"firstIndex", entries[0].Index,
+			"count", len(entries),
 			"term", currentTerm)
-		return 0, currentTerm, true, fmt.Errorf("failed to append entry: %w", err)
+		return nil, currentTerm, true, fmt.Errorf("failed to append entry: %w", err)
 	}
 
-	rm.logger.Debugw("Proposed entry appended to log",
-		"index", nextIndex,
-		"term", currentTerm,
-		"commandSize", len(command))
+	rm.logger.Debugw("Proposed entries appended to log",
+		"firstIndex", entries[0].Index,
+		"count", len(entries),
+		"term", currentTerm)
 
-	go rm.replicateToAllPeers(currentTerm, false)
-
-	return nextIndex, currentTerm, true, nil
+	return entries, currentTerm, true, nil
 }
 
 // AppendLeaderNoOp appends an empty entry for the current term and replicates it.
