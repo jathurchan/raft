@@ -513,24 +513,31 @@ func (rm *replicationManager) sendHeartbeatsAndCountResponses(
 	commitIndex := rm.stateMgr.GetCommitIndex()
 	responseCh := make(chan bool, len(peerIDs))
 
+	// Cancelled on return so that peers still pending do not keep their RPCs open.
+	timeoutCtx, cancel := context.WithTimeout(ctx, defaultAppendEntriesTimeout)
+	defer cancel()
+
 	// Send heartbeats concurrently
 	for _, peerID := range peerIDs {
 		go func(peer types.NodeID) {
-			success := rm.sendSingleHeartbeatAndWait(ctx, peer, term, commitIndex)
+			success := rm.sendSingleHeartbeatAndWait(timeoutCtx, peer, term, commitIndex)
 			responseCh <- success
 		}(peerID)
 	}
 
-	// Count successful responses with timeout
+	// Count successful responses, stopping as soon as the outcome is decided
 	successCount := 0
-	timeoutCtx, cancel := context.WithTimeout(ctx, defaultAppendEntriesTimeout)
-	defer cancel()
+	needed := rm.quorumSize - 1
 
 	for i := 0; i < len(peerIDs); i++ {
 		select {
 		case success := <-responseCh:
 			if success {
 				successCount++
+			}
+			remaining := len(peerIDs) - i - 1
+			if successCount >= needed || successCount+remaining < needed {
+				return successCount
 			}
 		case <-timeoutCtx.Done():
 			rm.logger.Debugw("Timeout waiting for heartbeat responses",
