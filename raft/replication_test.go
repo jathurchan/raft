@@ -53,7 +53,6 @@ func setupTestReplicationManager(
 		},
 		FeatureFlags: FeatureFlags{
 			EnableLeaderLease: true,
-			EnableReadIndex:   true,
 		},
 	}
 
