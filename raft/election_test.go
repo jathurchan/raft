@@ -1209,6 +1209,143 @@ func TestRecordElectionFailure(t *testing.T) {
 	)
 }
 
+func TestDefaultHandleElectionTimeout_PreVote(t *testing.T) {
+	setup := func(t *testing.T, grant bool, replyTerm types.Term) (*electionManager, *mockStateManager, *mockNetworkManager, *atomic.Bool) {
+		em, stateMgr, _, networkMgr, _, clock, _ := createTestElectionManager(t)
+		clock.Advance(time.Minute)
+		em.preVoteEnabled = true
+		stateMgr.currentTerm = 5
+		stateMgr.currentRole = types.RoleFollower
+
+		networkMgr.sendRequestVoteFunc = func(ctx context.Context, target types.NodeID, args *types.RequestVoteArgs) (*types.RequestVoteReply, error) {
+			testutil.AssertTrue(t, args.IsPreVote, "only pre-votes should be sent")
+			testutil.AssertEqual(t, types.Term(6), args.Term)
+			return &types.RequestVoteReply{Term: replyTerm, VoteGranted: grant}, nil
+		}
+
+		started := &atomic.Bool{}
+		em.startElection = func(ctx context.Context) { started.Store(true) }
+		return em, stateMgr, networkMgr, started
+	}
+
+	t.Run("starts the election when a quorum would grant", func(t *testing.T) {
+		em, _, _, started := setup(t, true, 5)
+
+		em.defaultHandleElectionTimeout(context.Background())
+
+		testutil.AssertTrue(t, started.Load(), "election should start")
+	})
+
+	t.Run("keeps its term when a quorum would refuse", func(t *testing.T) {
+		em, stateMgr, _, started := setup(t, false, 5)
+
+		em.defaultHandleElectionTimeout(context.Background())
+
+		testutil.AssertFalse(t, started.Load(), "election should not start")
+		testutil.AssertEqual(t, types.Term(5), stateMgr.currentTerm)
+		testutil.AssertEqual(t, uint64(0), em.electionCount.Load())
+	})
+
+	t.Run("adopts a higher term from a reply", func(t *testing.T) {
+		em, stateMgr, _, started := setup(t, false, 9)
+
+		em.defaultHandleElectionTimeout(context.Background())
+
+		testutil.AssertFalse(t, started.Load(), "election should not start")
+		testutil.AssertEqual(t, types.Term(9), stateMgr.currentTerm)
+	})
+
+	t.Run("proceeds without peers answering when disabled", func(t *testing.T) {
+		em, _, networkMgr, started := setup(t, false, 5)
+		em.preVoteEnabled = false
+		networkMgr.sendRequestVoteFunc = func(ctx context.Context, target types.NodeID, args *types.RequestVoteArgs) (*types.RequestVoteReply, error) {
+			t.Error("no pre-vote should be sent")
+			return nil, errors.New("unexpected")
+		}
+
+		em.defaultHandleElectionTimeout(context.Background())
+
+		testutil.AssertTrue(t, started.Load(), "election should start")
+	})
+}
+
+func TestHandleRequestVote_PreVote(t *testing.T) {
+	setup := func(t *testing.T) (*electionManager, *mockStateManager, *types.RequestVoteArgs) {
+		em, stateMgr, logMgr, _, _, _, _ := createTestElectionManager(t)
+		stateMgr.currentTerm = 5
+		stateMgr.currentRole = types.RoleFollower
+		stateMgr.votedFor = "node3"
+		logMgr.lastIndex = 10
+		logMgr.lastTerm = 5
+		em.electionElapsed = em.electionTickCount
+		return em, stateMgr, &types.RequestVoteArgs{
+			Term:         6,
+			CandidateID:  "node2",
+			LastLogIndex: 10,
+			LastLogTerm:  5,
+			IsPreVote:    true,
+		}
+	}
+
+	assertDenied := func(t *testing.T, em *electionManager, args *types.RequestVoteArgs) {
+		t.Helper()
+		reply, err := em.HandleRequestVote(context.Background(), args)
+		testutil.AssertNoError(t, err)
+		testutil.AssertFalse(t, reply.VoteGranted, "pre-vote should be denied")
+	}
+
+	t.Run("grants without changing any state", func(t *testing.T) {
+		em, stateMgr, args := setup(t)
+
+		reply, err := em.HandleRequestVote(context.Background(), args)
+
+		testutil.AssertNoError(t, err)
+		testutil.AssertTrue(t, reply.VoteGranted, "pre-vote should be granted")
+		testutil.AssertEqual(t, types.Term(5), reply.Term)
+		testutil.AssertEqual(t, types.Term(5), stateMgr.currentTerm)
+		testutil.AssertEqual(t, types.NodeID("node3"), stateMgr.votedFor)
+	})
+
+	t.Run("denies while a leader was heard recently", func(t *testing.T) {
+		em, stateMgr, args := setup(t)
+		stateMgr.leaderID = "node3"
+		em.electionElapsed = 0
+
+		assertDenied(t, em, args)
+	})
+
+	t.Run("grants once the known leader has gone quiet", func(t *testing.T) {
+		em, stateMgr, args := setup(t)
+		stateMgr.leaderID = "node3"
+
+		reply, err := em.HandleRequestVote(context.Background(), args)
+
+		testutil.AssertNoError(t, err)
+		testutil.AssertTrue(t, reply.VoteGranted, "pre-vote should be granted")
+	})
+
+	t.Run("denies when the node is the leader", func(t *testing.T) {
+		em, stateMgr, args := setup(t)
+		stateMgr.currentRole = types.RoleLeader
+
+		assertDenied(t, em, args)
+	})
+
+	t.Run("denies a log that is behind", func(t *testing.T) {
+		em, _, args := setup(t)
+		args.LastLogIndex = 9
+
+		assertDenied(t, em, args)
+	})
+
+	t.Run("denies a term that is not higher", func(t *testing.T) {
+		em, _, args := setup(t)
+		args.Term = 5
+
+		assertDenied(t, em, args)
+	})
+}
+
 func TestBecomeLeader_StepsDownWithoutHoldingSharedMutex(t *testing.T) {
 	tests := []struct {
 		name  string
