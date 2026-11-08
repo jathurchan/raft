@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/jathurchan/raft/logger"
 	"github.com/jathurchan/raft/testutil"
 	"github.com/jathurchan/raft/types"
@@ -2107,6 +2110,24 @@ func BenchmarkReplicationManager_Propose(b *testing.B) {
 	}
 }
 
+func TestReplicationManager_handleAppendError_DoesNotCountPeerResponses(t *testing.T) {
+	for name, rpcErr := range map[string]error{
+		"canceled by this node":  context.Canceled,
+		"error from the handler": status.Error(codes.Internal, "append failed"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rm, _, _, _, _, _ := setupTestReplicationManager(t)
+			defer rm.Stop()
+
+			rm.handleAppendError("node2", 1, rpcErr, false, time.Millisecond)
+
+			rm.mu.RLock()
+			defer rm.mu.RUnlock()
+			testutil.AssertEqual(t, 0, rm.peerStates["node2"].ConsecutiveFailures)
+		})
+	}
+}
+
 func TestReplicationManager_handleAppendError(t *testing.T) {
 	t.Run("TimeoutError", func(t *testing.T) {
 		rm, _, _, _, _, _ := setupTestReplicationManager(t)
@@ -2162,9 +2183,9 @@ func TestReplicationManager_handleAppendError(t *testing.T) {
 		testutil.AssertFalse(t, peerState.IsActive, "Peer should be marked inactive")
 		testutil.AssertEqual(
 			t,
-			1,
+			0,
 			peerState.ConsecutiveFailures,
-			"Should increment consecutive failures",
+			"Should not count as a connection failure",
 		)
 		rm.mu.RUnlock()
 	})
@@ -2222,9 +2243,9 @@ func TestReplicationManager_handleAppendError(t *testing.T) {
 		testutil.AssertFalse(t, peerState.IsActive, "Peer should be marked inactive")
 		testutil.AssertEqual(
 			t,
-			1,
+			0,
 			peerState.ConsecutiveFailures,
-			"Should increment consecutive failures",
+			"Should not count as a connection failure",
 		)
 		rm.mu.RUnlock()
 	})
