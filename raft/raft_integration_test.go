@@ -80,6 +80,19 @@ func TestRaftIntegration(t *testing.T) {
 
 		t.Run("BasicSnapshotting", func(t *testing.T) { testBasicSnapshotting(t, cluster) })
 	})
+
+	// Test suite for reads served by a newly elected leader.
+	t.Run("ReadIndex-After-Failover", func(t *testing.T) {
+		cfg := defaultTestConfig()
+		cfg.FeatureFlags = FeatureFlags{
+			EnableReadIndex:   true,
+			EnableLeaderLease: false,
+		}.WithExplicitFlags()
+		cluster := NewTestCluster(t, 3, cfg)
+		defer cluster.Stop()
+
+		testReadIndexAfterFailover(t, cluster)
+	})
 }
 
 // TestCluster provides a controlled environment for testing a Raft cluster.
@@ -138,7 +151,7 @@ func testCommandReplication(t *testing.T, cluster *TestCluster) {
 	index, term, isLeader, err := leader.raft.Propose(context.Background(), cmd)
 	testutil.AssertNoError(t, err)
 	testutil.AssertTrue(t, isLeader, "Propose should succeed on the leader")
-	testutil.AssertEqual(t, types.Index(1), index)
+	testutil.AssertEqual(t, types.Index(2), index, "index 1 holds the leader's no-op entry")
 	testutil.AssertEqual(t, types.Term(1), term)
 
 	// Advance the clock to allow for replication.
@@ -199,6 +212,57 @@ func testLeaderFailureRecovery(t *testing.T, cluster *TestCluster) {
 	// Verify that all active nodes have applied both commands.
 	cluster.WaitForAppliedSubset(t, 2, 20*time.Second, cluster.GetActiveNodeIDs())
 	cluster.CheckStateConsistency(t, 2)
+}
+
+// testReadIndexAfterFailover verifies that a new leader does not serve reads
+// from before an entry the previous leader had already committed.
+func testReadIndexAfterFailover(t *testing.T, cluster *TestCluster) {
+	t.Helper()
+
+	cluster.tick(cluster.config.Options.ElectionTickCount * 5)
+	oldLeaderID := cluster.WaitForLeader(t, 30*time.Second)
+	oldLeader := cluster.GetNode(oldLeaderID)
+
+	_, _, _, err := oldLeader.raft.Propose(context.Background(), []byte("first"))
+	testutil.AssertNoError(t, err)
+	cluster.tick(cluster.config.Options.HeartbeatTickCount * 5)
+	time.Sleep(200 * time.Millisecond)
+
+	// No ticks from here on, so followers do not learn that this entry committed.
+	index, _, _, err := oldLeader.raft.Propose(context.Background(), []byte("second"))
+	testutil.AssertNoError(t, err)
+	deadline := time.Now().Add(5 * time.Second)
+	for oldLeader.raft.GetCommitIndex() < index && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	testutil.AssertTrue(t, oldLeader.raft.GetCommitIndex() >= index, "old leader should commit")
+
+	cluster.StopNode(oldLeaderID)
+	newLeaderID := cluster.WaitForLeader(t, 30*time.Second)
+	newLeader := cluster.GetNode(newLeaderID)
+
+	var readIndex types.Index
+	cluster.WaitForCondition(10*time.Second, 10*time.Millisecond, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		readIndex, err = newLeader.raft.ReadIndex(ctx)
+		return err == nil
+	}, "new leader should eventually serve reads")
+
+	testutil.AssertTrue(
+		t,
+		readIndex >= index,
+		"ReadIndex %d must include committed entry %d",
+		readIndex,
+		index,
+	)
+
+	cluster.WaitForCondition(5*time.Second, 10*time.Millisecond, func() bool {
+		return newLeader.applier.GetAppliedCount() == 2
+	}, "new leader should apply both commands")
+	for _, msg := range newLeader.applier.GetAppliedEntries() {
+		testutil.AssertTrue(t, len(msg.Command) > 0, "applier must not receive empty entries")
+	}
 }
 
 // testBasicSnapshotting verifies that a snapshot is created when the log size exceeds the threshold.

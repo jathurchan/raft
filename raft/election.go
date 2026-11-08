@@ -39,6 +39,10 @@ type LeaderInitializer interface {
 	// for all followers.
 	InitializeLeaderState()
 
+	// AppendLeaderNoOp appends an empty entry for the new term so that entries from
+	// earlier terms can commit. Must be called with the shared Raft mutex held.
+	AppendLeaderNoOp()
+
 	// SendHeartbeats sends initial AppendEntries RPCs (heartbeats) to all follower nodes.
 	// This serves to establish authority as the new leader and prevent election timeouts.
 	// Should only be called by the leader.
@@ -750,6 +754,7 @@ func (em *electionManager) becomeLeader(ctx context.Context, term types.Term) {
 	em.splitVoteDetector.mu.Unlock()
 
 	em.leaderInitializer.InitializeLeaderState()
+	em.leaderInitializer.AppendLeaderNoOp()
 
 	go func() {
 		heartbeatCtx, cancel := context.WithTimeout(context.Background(), electionManagerOpTimeout)
