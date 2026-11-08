@@ -1209,6 +1209,48 @@ func TestRecordElectionFailure(t *testing.T) {
 	)
 }
 
+func TestBecomeLeader_StepsDownWithoutHoldingSharedMutex(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(em *electionManager, stateMgr *mockStateManager)
+	}{
+		{
+			name: "node shutting down",
+			setup: func(em *electionManager, stateMgr *mockStateManager) {
+				em.isShutdown.Store(true)
+			},
+		},
+		{
+			name: "leader transition fails",
+			setup: func(em *electionManager, stateMgr *mockStateManager) {
+				stateMgr.becomeLeaderFunc = func(ctx context.Context) bool { return false }
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
+			stateMgr.currentRole = types.RoleCandidate
+			stateMgr.currentTerm = 3
+			tt.setup(em, stateMgr)
+
+			steppedDown := false
+			stateMgr.becomeFollowerFunc = func(ctx context.Context, term types.Term, leaderID types.NodeID) {
+				// The real BecomeFollower takes the shared mutex.
+				steppedDown = true
+				testutil.AssertEqual(t, types.Term(3), term)
+				testutil.AssertTrue(t, em.mu.TryLock(), "shared mutex must not be held")
+				em.mu.Unlock()
+			}
+
+			em.becomeLeader(context.Background(), 3)
+
+			testutil.AssertTrue(t, steppedDown, "node should step down")
+		})
+	}
+}
+
 func TestBecomeLeader(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
