@@ -985,6 +985,7 @@ type mockLeaderInitializer struct {
 
 	initializeLeaderStateFunc func()
 	sendHeartbeatsFunc        func(ctx context.Context)
+	appendNoOpCalled          bool
 }
 
 var _ LeaderInitializer = &mockLeaderInitializer{}
@@ -998,6 +999,10 @@ func (m *mockLeaderInitializer) InitializeLeaderState() {
 		m.initializeLeaderStateFunc()
 		return
 	}
+}
+
+func (m *mockLeaderInitializer) AppendLeaderNoOp() {
+	m.appendNoOpCalled = true
 }
 
 func (m *mockLeaderInitializer) SendHeartbeats(ctx context.Context) {
@@ -2182,6 +2187,8 @@ func (m *mockReplicationManager) InitializeLeaderState() {
 	defer m.mu.Unlock()
 	m.initializeLeaderCalled++
 }
+
+func (m *mockReplicationManager) AppendLeaderNoOp() {}
 
 func (m *mockReplicationManager) Propose(
 	ctx context.Context,

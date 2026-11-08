@@ -80,6 +80,7 @@ func setupTestReplicationManager(
 	// Initialize leader state for tests
 	rmImpl := rm.(*replicationManager)
 	rmImpl.InitializeLeaderState()
+	rmImpl.readReadyTerm.Store(1)
 
 	return rmImpl, logMgr, stateMgr, networkMgr, snapshotMgr, clock
 }
@@ -792,6 +793,81 @@ func TestReplicationManager_VerifyLeadership_FailsFastWithoutQuorum(t *testing.T
 	_, err := rm.VerifyLeadershipAndGetCommitIndex(context.Background())
 
 	testutil.AssertError(t, err)
+}
+
+func TestReplicationManager_AppendLeaderNoOp(t *testing.T) {
+	t.Run("AppendsEmptyEntryForCurrentTerm", func(t *testing.T) {
+		rm, logMgr, _, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		logMgr.AddEntry(1, 1, []byte("cmd"))
+
+		rm.AppendLeaderNoOp()
+
+		testutil.AssertEqual(t, types.Index(2), logMgr.GetLastIndexUnsafe())
+		entries, err := logMgr.GetEntries(context.Background(), 2, 3)
+		testutil.AssertNoError(t, err)
+		testutil.AssertLen(t, entries, 1)
+		testutil.AssertEqual(t, types.Term(1), entries[0].Term)
+		testutil.AssertLen(t, entries[0].Command, 0)
+	})
+
+	t.Run("DoesNothingWhenNotLeader", func(t *testing.T) {
+		rm, logMgr, stateMgr, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		stateMgr.mu.Lock()
+		stateMgr.currentRole = types.RoleFollower
+		stateMgr.mu.Unlock()
+
+		rm.AppendLeaderNoOp()
+
+		testutil.AssertEqual(t, types.Index(0), logMgr.GetLastIndexUnsafe())
+	})
+}
+
+func TestReplicationManager_VerifyLeadership_RequiresCommitInCurrentTerm(t *testing.T) {
+	setup := func(t *testing.T) (*replicationManager, *mockLogManager, *mockStateManager) {
+		rm, logMgr, stateMgr, _, _, _ := setupTestReplicationManager(t)
+		t.Cleanup(rm.Stop)
+		rm.readReadyTerm.Store(0)
+		stateMgr.mu.Lock()
+		stateMgr.currentTerm = 2
+		stateMgr.commitIndex = 1
+		stateMgr.mu.Unlock()
+		logMgr.AddEntry(1, 1, []byte("previous term"))
+		logMgr.AddEntry(2, 2, nil)
+		return rm, logMgr, stateMgr
+	}
+
+	t.Run("RefusesWhileCommitIsFromEarlierTerm", func(t *testing.T) {
+		rm, _, _ := setup(t)
+
+		_, err := rm.VerifyLeadershipAndGetCommitIndex(context.Background())
+
+		testutil.AssertErrorIs(t, err, ErrUnavailable)
+	})
+
+	t.Run("RefusesEvenWithValidLease", func(t *testing.T) {
+		rm, _, _ := setup(t)
+		rm.mu.Lock()
+		rm.leaseExpiry = rm.clock.Now().Add(time.Minute)
+		rm.mu.Unlock()
+
+		_, err := rm.VerifyLeadershipAndGetCommitIndex(context.Background())
+
+		testutil.AssertErrorIs(t, err, ErrUnavailable)
+	})
+
+	t.Run("ServesOnceCurrentTermEntryCommits", func(t *testing.T) {
+		rm, _, stateMgr := setup(t)
+		stateMgr.mu.Lock()
+		stateMgr.commitIndex = 2
+		stateMgr.mu.Unlock()
+
+		index, err := rm.VerifyLeadershipAndGetCommitIndex(context.Background())
+
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, types.Index(2), index)
+	})
 }
 
 func TestReplicationManager_VerifyLeadershipAndGetCommitIndex(t *testing.T) {
