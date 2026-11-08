@@ -1206,6 +1206,7 @@ func TestBecomeLeader(t *testing.T) {
 			leaderInit.initializeStateCalled,
 			"InitializeLeaderState should be called",
 		)
+		testutil.AssertTrue(t, leaderInit.appendNoOpCalled, "AppendLeaderNoOp should be called")
 		testutil.AssertTrue(t, leaderInit.sendHeartbeatsCalled, "SendHeartbeats should be called")
 	})
 

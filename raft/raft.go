@@ -649,6 +649,12 @@ func (r *raftNode) applyEntries(entries []types.LogEntry) {
 			return
 		}
 
+		// Empty entries are leader no-ops; client commands are never empty.
+		if len(entry.Command) == 0 {
+			r.stateMgr.UpdateLastApplied(entry.Index)
+			continue
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), r.applyEntryTimeout)
 
 		applyStart := r.clock.Now()

@@ -38,6 +38,10 @@ type ReplicationManager interface {
 		command []byte,
 	) (index types.Index, term types.Term, isLeader bool, err error)
 
+	// AppendLeaderNoOp appends an empty entry for the current term and replicates it.
+	// Must be called with the shared Raft mutex held.
+	AppendLeaderNoOp()
+
 	// SendHeartbeats dispatches AppendEntries RPCs with no log entries to all peers
 	// to assert leadership and maintain authority by resetting their election timers.
 	// Should only be called by the leader.
@@ -194,6 +198,8 @@ type replicationManager struct {
 	leaseExpiry         time.Time     // Timestamp when the current lease expires
 	leaseDuration       time.Duration // Duration of the leader lease
 	lastQuorumHeartbeat time.Time     // Time of last successful quorum heartbeat
+
+	readReadyTerm atomic.Uint64 // Latest term known to have committed an entry of its own
 
 	applyNotifyCh  chan<- struct{} // Signals Raft core to apply newly committed log entries
 	notifyCommitCh chan struct{}   // Triggers commit index evaluation after replication events
@@ -405,6 +411,38 @@ func (rm *replicationManager) Propose(
 	return nextIndex, currentTerm, true, nil
 }
 
+// AppendLeaderNoOp appends an empty entry for the current term and replicates it.
+// Raft commits entries from earlier terms only once an entry from the leader's own
+// term commits, so without this a new leader could wait indefinitely for a client write.
+func (rm *replicationManager) AppendLeaderNoOp() {
+	if rm.isShutdown.Load() {
+		return
+	}
+
+	term, role, leaderID := rm.stateMgr.GetStateUnsafe()
+	if role != types.RoleLeader || leaderID != rm.id {
+		return
+	}
+
+	entry := types.LogEntry{
+		Index: rm.logMgr.GetLastIndexUnsafe() + 1,
+		Term:  term,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultLogFetchTimeout)
+	defer cancel()
+
+	if err := rm.logMgr.AppendEntriesUnsafe(ctx, []types.LogEntry{entry}); err != nil {
+		rm.logger.Errorw("Failed to append leader no-op entry",
+			"error", err,
+			"index", entry.Index,
+			"term", term)
+		return
+	}
+
+	go rm.replicateToAllPeers(term, false)
+}
+
 // SendHeartbeats dispatches AppendEntries RPCs with no log entries to all peers
 func (rm *replicationManager) SendHeartbeats(ctx context.Context) {
 	if rm.isShutdown.Load() {
@@ -453,6 +491,12 @@ func (rm *replicationManager) VerifyLeadershipAndGetCommitIndex(
 		return 0, ErrNotLeader
 	}
 
+	// Until an entry from this term commits, the commit index can trail entries
+	// the previous leader already committed, and a read could miss them.
+	if !rm.hasCommittedInTerm(term) {
+		return 0, ErrUnavailable
+	}
+
 	// If we have a valid lease, we can return immediately
 	if rm.HasValidLease(ctx) {
 		commitIndex := rm.stateMgr.GetCommitIndex()
@@ -492,6 +536,24 @@ func (rm *replicationManager) VerifyLeadershipAndGetCommitIndex(
 
 	return 0, fmt.Errorf("failed to verify leadership: only %d/%d peers responded",
 		successCount, rm.quorumSize-1)
+}
+
+// hasCommittedInTerm reports whether an entry from the given term has committed.
+func (rm *replicationManager) hasCommittedInTerm(term types.Term) bool {
+	if types.Term(rm.readReadyTerm.Load()) == term {
+		return true
+	}
+
+	committed, err := rm.isEntryFromCurrentTerm(rm.stateMgr.GetCommitIndex(), term)
+	if err != nil {
+		rm.logger.Warnw("Failed to check commit term for ReadIndex", "term", term, "error", err)
+		return false
+	}
+	if committed {
+		rm.readReadyTerm.Store(uint64(term))
+	}
+
+	return committed
 }
 
 // sendHeartbeatsAndCountResponses sends heartbeats and waits for responses
