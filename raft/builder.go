@@ -111,7 +111,8 @@ func (b *RaftBuilder) Build() (Raft, error) {
 		stopCh:              make(chan struct{}),
 		applyCh:             make(chan types.ApplyMsg, maxApplyBatchSize*2),
 		applyNotifyCh:       make(chan struct{}, 1),
-		leaderChangeCh:      make(chan types.NodeID, 1), // Buffered to prevent blocking
+		leaderChangeCh:      make(chan types.NodeID, leaderEventBufferSize),
+		leaderEventCh:       make(chan types.NodeID, leaderEventBufferSize),
 		applyLoopStopCh:     make(chan struct{}),
 		applyLoopDoneCh:     make(chan struct{}),
 		applyEntryTimeout:   applyTimeout,

@@ -45,6 +45,7 @@ type raftNode struct {
 	applyCh         chan types.ApplyMsg // Delivers committed entries/snapshots
 	applyNotifyCh   chan struct{}       // Signals new entries are committable
 	leaderChangeCh  chan types.NodeID   // Notifies of leader changes
+	leaderEventCh   chan types.NodeID   // Delivers leader changes to the application
 	applyLoopStopCh chan struct{}       // Stops apply loop specifically
 	applyLoopDoneCh chan struct{}       // Apply loop signals completion
 
@@ -384,7 +385,7 @@ func (r *raftNode) ApplyChannel() <-chan types.ApplyMsg {
 
 // LeaderChangeChannel returns the channel for leader change notifications
 func (r *raftNode) LeaderChangeChannel() <-chan types.NodeID {
-	return r.leaderChangeCh
+	return r.leaderEventCh
 }
 
 // RequestVote handles vote requests from candidates
@@ -701,12 +702,31 @@ func (r *raftNode) sendApplyMsg(msg types.ApplyMsg) {
 	}
 }
 
+// publishLeaderChange delivers a leader change to the application without blocking.
+// It must only be called from handleLeaderChanges, the channel's single sender.
+func (r *raftNode) publishLeaderChange(newLeader types.NodeID) {
+	for {
+		select {
+		case r.leaderEventCh <- newLeader:
+			return
+		default:
+		}
+
+		select {
+		case <-r.leaderEventCh:
+			r.metrics.ObserveLeaderNotificationDropped()
+		default:
+		}
+	}
+}
+
 // handleLeaderChanges processes leader change events
 func (r *raftNode) handleLeaderChanges() {
 	r.logger.Infow("Leader change handler started")
 	r.metrics.IncCounter("raft_leader_change_handler_started_total")
 
 	defer func() {
+		close(r.leaderEventCh)
 		r.logger.Infow("Leader change handler stopped")
 		r.metrics.IncCounter("raft_leader_change_handler_stopped_total")
 	}()
@@ -731,6 +751,8 @@ func (r *raftNode) handleLeaderChanges() {
 			} else {
 				r.metrics.IncCounter("raft_leader_unknown_total")
 			}
+
+			r.publishLeaderChange(newLeader)
 
 		case <-r.stopCh:
 			r.isLeader.Store(false)
