@@ -1792,21 +1792,13 @@ func TestReplicationManager_TriggerCommitCheck(t *testing.T) {
 		rm, _, _, _, _, _ := setupTestReplicationManager(t)
 		defer rm.Stop()
 
-		// Clear any existing notifications
-		select {
-		case <-rm.notifyCommitCh:
-		default:
-		}
+		// The commit loop consumes the notification, so observe the send instead.
+		metrics := &commitCheckCountingMetrics{Metrics: rm.metrics}
+		rm.metrics = metrics
 
 		rm.triggerCommitCheck()
 
-		// Should receive notification
-		select {
-		case <-rm.notifyCommitCh:
-			// Success
-		case <-time.After(100 * time.Millisecond):
-			t.Fatal("Expected commit check notification")
-		}
+		testutil.AssertEqual(t, int32(1), metrics.triggered.Load())
 	})
 
 	t.Run("HandlesChannelFull", func(t *testing.T) {
@@ -1895,6 +1887,16 @@ func TestReplicationManager_Stop(t *testing.T) {
 		rm.Stop()
 		wg.Wait()
 	})
+}
+
+// commitCheckCountingMetrics counts commit checks that were successfully triggered.
+type commitCheckCountingMetrics struct {
+	Metrics
+	triggered atomic.Int32
+}
+
+func (m *commitCheckCountingMetrics) ObserveCommitCheckTriggered() {
+	m.triggered.Add(1)
 }
 
 func TestReplicationManager_ConcurrentOperations(t *testing.T) {
