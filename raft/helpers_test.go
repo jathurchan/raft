@@ -432,10 +432,10 @@ func (m *mockNetworkManager) SendRequestVote(
 	target types.NodeID,
 	args *types.RequestVoteArgs,
 ) (*types.RequestVoteReply, error) {
-	m.mu.RLock()
+	m.mu.Lock()
 	fn := m.sendRequestVoteFunc
 	m.callCount++
-	m.mu.RUnlock()
+	m.mu.Unlock()
 
 	if err, exists := m.requestVoteErrors[target]; exists {
 		return nil, err

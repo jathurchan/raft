@@ -350,12 +350,11 @@ func TestTick(t *testing.T) {
 		ctx := context.Background()
 		em.Tick(ctx)
 
-		testutil.AssertEqual(
-			t,
-			em.randomizedPeriod,
-			em.electionElapsed,
-			"Election elapsed should increment by 1",
-		)
+		em.timerMu.Lock()
+		period, elapsed := em.randomizedPeriod, em.electionElapsed
+		em.timerMu.Unlock()
+
+		testutil.AssertEqual(t, period, elapsed, "Election elapsed should increment by 1")
 		// Should not have started election yet
 		testutil.AssertFalse(t, em.electionInFlight.Load(), "Election should not be in flight yet")
 	})
@@ -1325,12 +1324,16 @@ func TestDefaultStartElection(t *testing.T) {
 		}
 
 		stateMgr.becomeCandidateFunc = func(ctx context.Context, reason ElectionReason) bool {
+			stateMgr.mu.Lock()
+			defer stateMgr.mu.Unlock()
 			stateMgr.currentTerm++
 			stateMgr.currentRole = types.RoleCandidate
 			stateMgr.votedFor = em.id
 			return true
 		}
 		stateMgr.becomeLeaderFunc = func(ctx context.Context) bool {
+			stateMgr.mu.Lock()
+			defer stateMgr.mu.Unlock()
 			stateMgr.currentRole = types.RoleLeader
 			stateMgr.leaderID = em.id
 			return true
@@ -1533,6 +1536,9 @@ func TestBroadcastVoteRequests(t *testing.T) {
 
 		// Give some time for goroutines to complete, as they run concurrently
 		time.Sleep(100 * time.Millisecond)
+
+		mu.Lock()
+		defer mu.Unlock()
 
 		// Should have sent to 2 peers (excluding self: node2, node3)
 		expectedPeers := []types.NodeID{"node2", "node3"}
