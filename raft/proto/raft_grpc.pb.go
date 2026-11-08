@@ -95,7 +95,8 @@ type RaftServer interface {
 	mustEmbedUnimplementedRaftServer()
 }
 
-// UnimplementedRaftServer must be embedded to have forward compatible implementations.
+// UnimplementedRaftServer must be embedded to have
+// forward compatible implementations.
 //
 // NOTE: this should be embedded by value instead of pointer to avoid a nil
 // pointer dereference when methods are called.
@@ -121,7 +122,7 @@ type UnsafeRaftServer interface {
 }
 
 func RegisterRaftServer(s grpc.ServiceRegistrar, srv RaftServer) {
-	// If the following call panics, it indicates UnimplementedRaftServer was
+	// If the following call pancis, it indicates UnimplementedRaftServer was
 	// embedded by pointer and is nil.  This will cause panics if an
 	// unimplemented method is ever invoked, so we test this at initialization
 	// time to prevent it from happening at runtime later due to I/O.

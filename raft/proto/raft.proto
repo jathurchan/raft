@@ -80,8 +80,12 @@ message InstallSnapshotRequest {
     uint64 last_included_index = 3;
     // The term of the last log entry included in the snapshot.
     uint64 last_included_term = 4;
-    // The raw byte data of the snapshot.
+    // The raw byte data of the snapshot, or of one chunk of it.
     bytes data = 5;
+    // Byte position of this chunk within the snapshot.
+    uint64 offset = 6;
+    // True if further chunks follow. Unset for a snapshot sent in one message.
+    bool more_chunks = 7;
 }
 
 // InstallSnapshotResponse contains the results for the InstallSnapshot RPC.
