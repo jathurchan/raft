@@ -389,9 +389,7 @@ func (em *electionManager) Tick(ctx context.Context) {
 	defer em.concurrentOps.Add(-1)
 
 	shouldTriggerElection := func() bool {
-		em.mu.RLock()
 		_, role, _ := em.stateMgr.GetState()
-		em.mu.RUnlock()
 
 		if role != types.RoleFollower {
 			return false
