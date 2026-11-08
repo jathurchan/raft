@@ -704,6 +704,8 @@ func (nm *gRPCNetworkManager) SendInstallSnapshot(
 		LastIncludedIndex: uint64(args.LastIncludedIndex),
 		LastIncludedTerm:  uint64(args.LastIncludedTerm),
 		Data:              args.Data,
+		Offset:            args.Offset,
+		MoreChunks:        args.MoreChunks,
 	}
 	dataSize := len(args.Data)
 
@@ -1108,6 +1110,8 @@ func (h *grpcServerHandler) InstallSnapshot(
 		LastIncludedIndex: types.Index(req.LastIncludedIndex),
 		LastIncludedTerm:  types.Term(req.LastIncludedTerm),
 		Data:              req.Data,
+		Offset:            req.Offset,
+		MoreChunks:        req.MoreChunks,
 	}
 
 	h.logger.Infow(
