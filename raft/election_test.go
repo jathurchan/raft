@@ -341,6 +341,25 @@ func TestResetTimerOnHeartbeat(t *testing.T) {
 	})
 }
 
+func TestTick_DoesNotHoldSharedMutexWhileReadingState(t *testing.T) {
+	em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
+	em.electionElapsed = 0
+
+	checked := false
+	stateMgr.getStateFunc = func() (types.Term, types.NodeRole, types.NodeID) {
+		// GetState takes the shared mutex, so holding it here could deadlock
+		// with a waiting writer.
+		checked = true
+		testutil.AssertTrue(t, em.mu.TryLock(), "shared mutex must not be held")
+		em.mu.Unlock()
+		return 1, types.RoleCandidate, ""
+	}
+
+	em.Tick(context.Background())
+
+	testutil.AssertTrue(t, checked, "Tick should read the node state")
+}
+
 func TestTick(t *testing.T) {
 	t.Run("FollowerTick_NoElection", func(t *testing.T) {
 		em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
