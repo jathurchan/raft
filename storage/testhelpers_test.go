@@ -302,6 +302,10 @@ func (mfs *mockFileSystem) defaultOpen(name string) (file, error) {
 	}, nil
 }
 
+func (mfs *mockFileSystem) Create(name string) (file, error) {
+	return mfs.Open(name)
+}
+
 func (mfs *mockFileSystem) Open(name string) (file, error) {
 	if mfs.OpenFunc != nil {
 		return mfs.OpenFunc(name)

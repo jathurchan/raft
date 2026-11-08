@@ -15,6 +15,9 @@ type fileSystem interface {
 	Stat(name string) (os.FileInfo, error)
 	ReadFile(name string) ([]byte, error)
 	Open(name string) (file, error)
+
+	// Create opens the named file for writing, creating it or discarding its contents.
+	Create(name string) (file, error)
 	Exists(name string) (bool, error)
 	Truncate(name string, size int64) error
 	WriteFile(name string, data []byte, perm os.FileMode) error
@@ -94,6 +97,15 @@ func (fs defaultFileSystem) AtomicWrite(path string, data []byte, perm os.FileMo
 // ReadFile reads the contents of the specified file and returns the data.
 func (fs defaultFileSystem) ReadFile(name string) ([]byte, error) {
 	return os.ReadFile(name)
+}
+
+// Create opens the specified file for writing, creating it or discarding its contents.
+func (fs defaultFileSystem) Create(name string) (file, error) {
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, ownRWOthR)
+	if err != nil {
+		return nil, err
+	}
+	return &defaultFile{File: f}, nil
 }
 
 // Open opens the specified file and wraps it in a file interface.

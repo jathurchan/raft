@@ -133,7 +133,7 @@ func (w *defaultSnapshotWriter) writeSnapshotData(
 	path string,
 	data []byte,
 ) error {
-	file, err := w.fs.Open(path)
+	file, err := w.fs.Create(path)
 	if err != nil {
 		return fmt.Errorf("%w: could not open snapshot file: %w", ErrStorageIO, err)
 	}
