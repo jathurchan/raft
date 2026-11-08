@@ -81,6 +81,14 @@ func TestRaftIntegration(t *testing.T) {
 		t.Run("BasicSnapshotting", func(t *testing.T) { testBasicSnapshotting(t, cluster) })
 	})
 
+	// Test suite for snapshot transfer over gRPC.
+	t.Run("InstallSnapshot-Chunked", func(t *testing.T) {
+		cluster := NewTestCluster(t, 3, defaultTestConfig())
+		defer cluster.Stop()
+
+		testInstallChunkedSnapshot(t, cluster)
+	})
+
 	// Test suite for reads served by a newly elected leader.
 	t.Run("ReadIndex-After-Failover", func(t *testing.T) {
 		cfg := defaultTestConfig()
@@ -263,6 +271,41 @@ func testReadIndexAfterFailover(t *testing.T, cluster *TestCluster) {
 	for _, msg := range newLeader.applier.GetAppliedEntries() {
 		testutil.AssertTrue(t, len(msg.Command) > 0, "applier must not receive empty entries")
 	}
+}
+
+// testInstallChunkedSnapshot sends a snapshot larger than the gRPC message limit in
+// chunks, and verifies that the follower's commit and applied indexes move to it.
+func testInstallChunkedSnapshot(t *testing.T, cluster *TestCluster) {
+	t.Helper()
+
+	const chunkSize = 4 * 1024 * 1024
+	const snapshotIndex = types.Index(7)
+
+	data := make([]byte, DefaultMaxRecvMsgSize+chunkSize)
+	for offset := 0; offset < len(data); offset += chunkSize {
+		end := min(offset+chunkSize, len(data))
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		_, err := cluster.GetNode("node1").networkMgr.SendInstallSnapshot(
+			ctx,
+			"node2",
+			&types.InstallSnapshotArgs{
+				Term:              1,
+				LeaderID:          "node1",
+				LastIncludedIndex: snapshotIndex,
+				LastIncludedTerm:  1,
+				Data:              data[offset:end],
+				Offset:            uint64(offset),
+				MoreChunks:        end < len(data),
+			},
+		)
+		cancel()
+		testutil.AssertNoError(t, err)
+	}
+
+	status := cluster.GetNode("node2").raft.Status()
+	testutil.AssertEqual(t, snapshotIndex, status.SnapshotIndex)
+	testutil.AssertEqual(t, snapshotIndex, status.CommitIndex)
+	testutil.AssertEqual(t, snapshotIndex, status.LastApplied)
 }
 
 // testBasicSnapshotting verifies that a snapshot is created when the log size exceeds the threshold.
