@@ -159,8 +159,11 @@ func testCommandReplication(t *testing.T, cluster *TestCluster) {
 	index, term, isLeader, err := leader.raft.Propose(context.Background(), cmd)
 	testutil.AssertNoError(t, err)
 	testutil.AssertTrue(t, isLeader, "Propose should succeed on the leader")
-	testutil.AssertEqual(t, types.Index(2), index, "index 1 holds the leader's no-op entry")
-	testutil.AssertEqual(t, types.Term(1), term)
+
+	// Elections can be retried, so the term and the number of earlier no-op entries vary.
+	leaderTerm, _ := leader.raft.GetState()
+	testutil.AssertEqual(t, leaderTerm, term)
+	testutil.AssertTrue(t, index >= 2, "index 1 holds a leader's no-op entry")
 
 	// Advance the clock to allow for replication.
 	cluster.tick(cluster.config.Options.HeartbeatTickCount * 3)
