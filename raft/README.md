@@ -501,7 +501,7 @@ type Options struct {
     ApplyEntryTimeout     time.Duration // Max time to apply one log entry to state machine (default: 5s).
     FetchEntriesTimeout   time.Duration // Max time to fetch log entries from storage (default: 5s).
     LogCompactionMinEntries int         // Min log entries after snapshot before compaction (default: 5000).
-    // StorageSyncDelay and ApplyTickCount have defaults but their usage might vary based on specific logic.
+    // StorageSyncDelay and ApplyTickCount are deprecated and have no effect.
 }
 ```
 
@@ -513,12 +513,12 @@ Toggles for enabling/disabling specific Raft protocol optimizations:
 
 ```go
 type FeatureFlags struct {
-    EnableReadIndex   bool // Enables ReadIndex protocol for linearizable reads (default: true).
-    EnableLeaderLease bool // Enables leader lease for faster ReadIndex (default: true).
+    EnableReadIndex   bool // Deprecated: no effect. ReadIndex is always available.
+    EnableLeaderLease bool // Enables leader lease for faster ReadIndex (default: false).
 }
 ```
 
-Call `WithExplicitFlags()` on a `FeatureFlags` struct to mark that these have been intentionally set by the user, preventing them from being overridden by internal defaults if the struct itself was provided.
+Flags are used exactly as set, so a flag left unset is off. `WithExplicitFlags()` is deprecated and has no effect.
 *Source: `raft/config.go`*
 
 ### Tuning Parameters
@@ -640,7 +640,7 @@ log.Printf("Linearizable read possible up to commit index %d\n", commitIndex)
 
 ### Leader Lease Optimization
 
-If `EnableLeaderLease` and `EnableReadIndex` are active (`raft/config.go`), the leader can serve `ReadIndex` requests based on a time lease without contacting a quorum, reducing latency.
+If `EnableLeaderLease` is set (`raft/config.go`), the leader can serve `ReadIndex` requests based on a time lease without contacting a quorum, reducing latency.
 
 ```go
 // In your Raft Config:
