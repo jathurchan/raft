@@ -81,6 +81,17 @@ func TestRaftIntegration(t *testing.T) {
 		t.Run("BasicSnapshotting", func(t *testing.T) { testBasicSnapshotting(t, cluster) })
 	})
 
+	// Test suite for elections and failover with pre-vote enabled.
+	t.Run("PreVote-3-Nodes", func(t *testing.T) {
+		cfg := defaultTestConfig()
+		cfg.FeatureFlags.EnablePreVote = true
+		cluster := NewTestCluster(t, 3, cfg)
+		defer cluster.Stop()
+
+		t.Run("CommandReplication", func(t *testing.T) { testCommandReplication(t, cluster) })
+		t.Run("LeaderFailureRecovery", func(t *testing.T) { testPreVoteLeaderFailure(t, cluster) })
+	})
+
 	// Test suite for a cluster with no peers, where a node wins and commits alone.
 	t.Run("Single-Node", func(t *testing.T) {
 		cluster := NewTestCluster(t, 1, defaultTestConfig())
@@ -336,6 +347,17 @@ func testSingleNodeCluster(t *testing.T, cluster *TestCluster) {
 	readIndex, err := leader.raft.ReadIndex(ctx)
 	testutil.AssertNoError(t, err)
 	testutil.AssertTrue(t, readIndex >= index, "ReadIndex should include the command")
+}
+
+// testPreVoteLeaderFailure verifies that survivors elect a new leader with pre-vote on.
+func testPreVoteLeaderFailure(t *testing.T, cluster *TestCluster) {
+	t.Helper()
+
+	oldLeader := cluster.WaitForLeader(t, 15*time.Second)
+	cluster.StopNode(oldLeader)
+
+	newLeader := cluster.WaitForLeader(t, 15*time.Second)
+	testutil.AssertTrue(t, newLeader != oldLeader, "a different node should become leader")
 }
 
 // testBasicSnapshotting verifies that a snapshot is created when the log size exceeds the threshold.
