@@ -1113,3 +1113,134 @@ func TestSnapshotManager_Stop(t *testing.T) {
 		)
 	})
 }
+
+func TestSendSnapshot_Chunking(t *testing.T) {
+	setup := func(t *testing.T, chunkSize int, data []byte) (*snapshotManager, *mockNetworkManager, types.Term) {
+		sm, mockStorage, stateMgr, _, _ := setupSnapshotManager(t)
+		mockNetwork := &mockNetworkManager{}
+		sm.networkMgr = mockNetwork
+		sm.cfg.TuningParams.MaxSnapshotChunkSize = chunkSize
+		mockStorage.hookLoadSnapshot = func(ctx context.Context) (types.SnapshotMetadata, []byte, error) {
+			return types.SnapshotMetadata{LastIncludedIndex: 10, LastIncludedTerm: 2}, data, nil
+		}
+		stateMgr.currentTerm = 3
+		stateMgr.currentRole = types.RoleLeader
+		return sm, mockNetwork, stateMgr.currentTerm
+	}
+
+	capture := func(sent *[]*types.InstallSnapshotArgs, replyTerm types.Term) func(context.Context, types.NodeID, *types.InstallSnapshotArgs) (*types.InstallSnapshotReply, error) {
+		return func(ctx context.Context, target types.NodeID, args *types.InstallSnapshotArgs) (*types.InstallSnapshotReply, error) {
+			*sent = append(*sent, args)
+			return &types.InstallSnapshotReply{Term: replyTerm}, nil
+		}
+	}
+
+	t.Run("splits data into ordered chunks", func(t *testing.T) {
+		sm, mockNetwork, term := setup(t, 4, []byte("abcdefghij"))
+		var sent []*types.InstallSnapshotArgs
+		mockNetwork.sendInstallSnapshotFunc = capture(&sent, term)
+
+		sm.SendSnapshot(context.Background(), "follower1", term)
+
+		testutil.AssertLen(t, sent, 3)
+		for i, want := range []struct {
+			data   string
+			offset uint64
+			more   bool
+		}{{"abcd", 0, true}, {"efgh", 4, true}, {"ij", 8, false}} {
+			testutil.AssertEqual(t, want.data, string(sent[i].Data))
+			testutil.AssertEqual(t, want.offset, sent[i].Offset)
+			testutil.AssertEqual(t, want.more, sent[i].MoreChunks)
+		}
+	})
+
+	t.Run("sends one message when chunking is disabled", func(t *testing.T) {
+		sm, mockNetwork, term := setup(t, 0, []byte("abcdefghij"))
+		var sent []*types.InstallSnapshotArgs
+		mockNetwork.sendInstallSnapshotFunc = capture(&sent, term)
+
+		sm.SendSnapshot(context.Background(), "follower1", term)
+
+		testutil.AssertLen(t, sent, 1)
+		testutil.AssertEqual(t, "abcdefghij", string(sent[0].Data))
+		testutil.AssertFalse(t, sent[0].MoreChunks)
+	})
+
+	t.Run("stops when a peer reports a higher term", func(t *testing.T) {
+		sm, mockNetwork, term := setup(t, 4, []byte("abcdefghij"))
+		var sent []*types.InstallSnapshotArgs
+		mockNetwork.sendInstallSnapshotFunc = capture(&sent, term+1)
+
+		sm.SendSnapshot(context.Background(), "follower1", term)
+
+		testutil.AssertLen(t, sent, 1)
+	})
+}
+
+func TestRaftSnapshot_HandleInstall_Chunks(t *testing.T) {
+	chunk := func(data string, offset uint64, more bool) *types.InstallSnapshotArgs {
+		return &types.InstallSnapshotArgs{
+			Term:              4,
+			LeaderID:          "leader1",
+			LastIncludedIndex: 10,
+			LastIncludedTerm:  2,
+			Data:              []byte(data),
+			Offset:            offset,
+			MoreChunks:        more,
+		}
+	}
+
+	t.Run("installs only after the last chunk", func(t *testing.T) {
+		sm, mockStore, _, applier, _ := setupSnapshotManager(t)
+
+		for _, args := range []*types.InstallSnapshotArgs{chunk("abcd", 0, true), chunk("efgh", 4, true)} {
+			_, err := sm.HandleInstallSnapshot(context.Background(), args)
+			testutil.AssertNoError(t, err)
+			testutil.AssertFalse(t, mockStore.snapshotSaved, "partial snapshot must not be saved")
+		}
+
+		_, err := sm.HandleInstallSnapshot(context.Background(), chunk("ij", 8, false))
+
+		testutil.AssertNoError(t, err)
+		testutil.AssertTrue(t, mockStore.snapshotSaved, "complete snapshot should be saved")
+		testutil.AssertEqual(t, "abcdefghij", string(applier.snapshotData))
+	})
+
+	t.Run("rejects a chunk at the wrong offset", func(t *testing.T) {
+		sm, mockStore, _, _, _ := setupSnapshotManager(t)
+
+		_, err := sm.HandleInstallSnapshot(context.Background(), chunk("abcd", 0, true))
+		testutil.AssertNoError(t, err)
+
+		_, err = sm.HandleInstallSnapshot(context.Background(), chunk("ij", 8, false))
+
+		testutil.AssertErrorIs(t, err, ErrSnapshotChunkOutOfOrder)
+		testutil.AssertFalse(t, mockStore.snapshotSaved)
+	})
+
+	t.Run("rejects a chunk from a different snapshot", func(t *testing.T) {
+		sm, _, _, _, _ := setupSnapshotManager(t)
+
+		_, err := sm.HandleInstallSnapshot(context.Background(), chunk("abcd", 0, true))
+		testutil.AssertNoError(t, err)
+
+		other := chunk("efgh", 4, false)
+		other.LastIncludedIndex = 11
+		_, err = sm.HandleInstallSnapshot(context.Background(), other)
+
+		testutil.AssertErrorIs(t, err, ErrSnapshotChunkOutOfOrder)
+	})
+
+	t.Run("restarts when a new transfer begins", func(t *testing.T) {
+		sm, _, _, applier, _ := setupSnapshotManager(t)
+
+		_, err := sm.HandleInstallSnapshot(context.Background(), chunk("stale", 0, true))
+		testutil.AssertNoError(t, err)
+		_, err = sm.HandleInstallSnapshot(context.Background(), chunk("abcd", 0, true))
+		testutil.AssertNoError(t, err)
+		_, err = sm.HandleInstallSnapshot(context.Background(), chunk("ef", 4, false))
+		testutil.AssertNoError(t, err)
+
+		testutil.AssertEqual(t, "abcdef", string(applier.snapshotData))
+	})
+}

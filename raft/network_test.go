@@ -986,6 +986,40 @@ func TestNetworkManager_SendAppendEntries(t *testing.T) {
 	}
 }
 
+func TestNetworkManager_SendInstallSnapshot_PreservesChunkFields(t *testing.T) {
+	nm, _, _, _ := setupDefaultNetworkManager(t, "node1-chunk", "localhost:0", nil)
+	testutil.AssertNoError(t, nm.Start())
+	defer func() { _ = nm.Stop() }()
+
+	var received *types.InstallSnapshotArgs
+	handler := &mockRPCHandler{}
+	handler.installSnapshotFunc = func(ctx context.Context, args *types.InstallSnapshotArgs) (*types.InstallSnapshotReply, error) {
+		received = args
+		return &types.InstallSnapshotReply{Term: args.Term}, nil
+	}
+	addr, cleanup := setupPeerServer(t, "localhost:0", handler)
+	defer cleanup()
+
+	peer := types.NodeID("peer1-chunk")
+	nm.mu.Lock()
+	nm.peers[peer] = PeerConfig{ID: peer, Address: addr}
+	nm.mu.Unlock()
+
+	_, err := nm.SendInstallSnapshot(context.Background(), peer, &types.InstallSnapshotArgs{
+		Term:              1,
+		LeaderID:          "node1-chunk",
+		LastIncludedIndex: 10,
+		LastIncludedTerm:  1,
+		Data:              []byte("chunk"),
+		Offset:            4096,
+		MoreChunks:        true,
+	})
+
+	testutil.AssertNoError(t, err)
+	testutil.AssertEqual(t, uint64(4096), received.Offset)
+	testutil.AssertTrue(t, received.MoreChunks, "MoreChunks should cross the wire")
+}
+
 func TestNetworkManager_SendInstallSnapshot(t *testing.T) {
 	nm1, _, _, _ := setupDefaultNetworkManager(t, "node1-is", "localhost:0", nil)
 	err := nm1.Start()

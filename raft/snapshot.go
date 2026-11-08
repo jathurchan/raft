@@ -164,6 +164,14 @@ func validateSnapshotManagerDeps(deps SnapshotManagerDeps) error {
 	}
 }
 
+// incomingSnapshot holds a snapshot being received in chunks.
+type incomingSnapshot struct {
+	term              types.Term
+	lastIncludedIndex types.Index
+	lastIncludedTerm  types.Term
+	data              []byte
+}
+
 // snapshotManager is a concrete implementation of the SnapshotManager interface.
 type snapshotManager struct {
 	mu            *sync.RWMutex   // Raft's mutex protecting state fields
@@ -191,6 +199,9 @@ type snapshotManager struct {
 
 	lastSnapshotIndex types.Index // Last snapshot index (protected by mu)
 	lastSnapshotTerm  types.Term  // Last snapshot term (protected by mu)
+
+	incomingMu sync.Mutex        // Protects incoming
+	incoming   *incomingSnapshot // Snapshot being received in chunks, if any
 
 	snapshotCreateInProgress atomic.Bool   // Prevents concurrent local snapshot creation
 	snapshotOpsCounter       *atomic.Int32 // Counts all active snapshot ops (create, send, handle) for graceful shutdown
@@ -774,11 +785,19 @@ func (sm *snapshotManager) processInstallSnapshot(
 		return reply, nil
 	}
 
-	if err := sm.saveSnapshotToStorage(ctx, incomingMeta, args.Data); err != nil {
+	data, complete, err := sm.assembleSnapshotChunk(args)
+	if err != nil {
+		return nil, err
+	}
+	if !complete {
+		return reply, nil
+	}
+
+	if err := sm.saveSnapshotToStorage(ctx, incomingMeta, data); err != nil {
 		return nil, fmt.Errorf("failed to save incoming snapshot to storage: %w", err)
 	}
 
-	if err := sm.restoreSnapshotToStateMachine(ctx, incomingMeta, args.Data); err != nil {
+	if err := sm.restoreSnapshotToStateMachine(ctx, incomingMeta, data); err != nil {
 		return nil, fmt.Errorf("failed to restore state machine from incoming snapshot: %w", err)
 	}
 
@@ -786,6 +805,49 @@ func (sm *snapshotManager) processInstallSnapshot(
 	sm.truncateLogAfterSnapshot(ctx, incomingMeta.LastIncludedIndex)
 
 	return reply, nil
+}
+
+// assembleSnapshotChunk adds a chunk to the snapshot being received. It returns the
+// full snapshot and true once the last chunk arrives.
+func (sm *snapshotManager) assembleSnapshotChunk(
+	args *types.InstallSnapshotArgs,
+) ([]byte, bool, error) {
+	sm.incomingMu.Lock()
+	defer sm.incomingMu.Unlock()
+
+	if args.Offset == 0 {
+		sm.incoming = nil
+		if !args.MoreChunks {
+			return args.Data, true, nil
+		}
+		sm.incoming = &incomingSnapshot{
+			term:              args.Term,
+			lastIncludedIndex: args.LastIncludedIndex,
+			lastIncludedTerm:  args.LastIncludedTerm,
+		}
+	}
+
+	in := sm.incoming
+	if in == nil || in.term != args.Term ||
+		in.lastIncludedIndex != args.LastIncludedIndex ||
+		in.lastIncludedTerm != args.LastIncludedTerm ||
+		uint64(len(in.data)) != args.Offset {
+		sm.incoming = nil
+		return nil, false, fmt.Errorf(
+			"%w: index %d, offset %d",
+			ErrSnapshotChunkOutOfOrder,
+			args.LastIncludedIndex,
+			args.Offset,
+		)
+	}
+
+	in.data = append(in.data, args.Data...)
+	if args.MoreChunks {
+		return nil, false, nil
+	}
+
+	sm.incoming = nil
+	return in.data, true, nil
 }
 
 // isStaleSnapshot checks if the incoming snapshot metadata is older than or equal to
@@ -974,15 +1036,7 @@ func (sm *snapshotManager) SendSnapshot(
 		return
 	}
 
-	args := &types.InstallSnapshotArgs{
-		Term:              term,
-		LeaderID:          sm.id,
-		LastIncludedIndex: meta.LastIncludedIndex,
-		LastIncludedTerm:  meta.LastIncludedTerm,
-		Data:              data,
-	}
-
-	reply, err := sm.sendInstallSnapshotRPC(ctx, targetID, args)
+	reply, err := sm.sendSnapshotChunks(ctx, targetID, term, meta, data)
 	if err != nil {
 		sm.logger.Errorw("Aborting snapshot send: RPC failed", "peer", targetID, "error", err)
 		return
@@ -997,6 +1051,44 @@ func (sm *snapshotManager) SendSnapshot(
 		"snapshotIndex",
 		meta.LastIncludedIndex,
 	)
+}
+
+// sendSnapshotChunks sends the snapshot in chunks of at most MaxSnapshotChunkSize bytes,
+// or in one message when chunking is disabled. It returns the last reply received.
+func (sm *snapshotManager) sendSnapshotChunks(
+	ctx context.Context,
+	targetID types.NodeID,
+	term types.Term,
+	meta types.SnapshotMetadata,
+	data []byte,
+) (*types.InstallSnapshotReply, error) {
+	chunkSize := sm.cfg.TuningParams.MaxSnapshotChunkSize
+	if chunkSize <= 0 {
+		chunkSize = len(data)
+	}
+
+	for offset := 0; ; {
+		end := min(offset+chunkSize, len(data))
+		args := &types.InstallSnapshotArgs{
+			Term:              term,
+			LeaderID:          sm.id,
+			LastIncludedIndex: meta.LastIncludedIndex,
+			LastIncludedTerm:  meta.LastIncludedTerm,
+			Data:              data[offset:end],
+			Offset:            uint64(offset),
+			MoreChunks:        end < len(data),
+		}
+
+		reply, err := sm.sendInstallSnapshotRPC(ctx, targetID, args)
+		if err != nil {
+			return nil, err
+		}
+		if !args.MoreChunks || reply.Term > term {
+			return reply, nil
+		}
+
+		offset = end
+	}
 }
 
 // loadSnapshotForSending loads snapshot data from storage for sending to a peer.
