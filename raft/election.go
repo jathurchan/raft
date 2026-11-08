@@ -653,12 +653,7 @@ func (em *electionManager) defaultStartElection(ctx context.Context) {
 			"nodeID", em.id,
 			"term", newTerm)
 
-		if em.electionInFlight.CompareAndSwap(false, true) {
-			go func() {
-				defer em.electionInFlight.Store(false)
-				em.becomeLeader(ctx, newTerm)
-			}()
-		}
+		go em.becomeLeader(ctx, newTerm)
 	} else {
 		em.logger.Infow("Waiting for vote replies to achieve quorum",
 			"nodeID", em.id,

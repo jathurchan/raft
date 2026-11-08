@@ -81,6 +81,14 @@ func TestRaftIntegration(t *testing.T) {
 		t.Run("BasicSnapshotting", func(t *testing.T) { testBasicSnapshotting(t, cluster) })
 	})
 
+	// Test suite for a cluster with no peers, where a node wins and commits alone.
+	t.Run("Single-Node", func(t *testing.T) {
+		cluster := NewTestCluster(t, 1, defaultTestConfig())
+		defer cluster.Stop()
+
+		testSingleNodeCluster(t, cluster)
+	})
+
 	// Test suite for snapshot transfer over gRPC.
 	t.Run("InstallSnapshot-Chunked", func(t *testing.T) {
 		cluster := NewTestCluster(t, 3, defaultTestConfig())
@@ -309,6 +317,25 @@ func testInstallChunkedSnapshot(t *testing.T, cluster *TestCluster) {
 	testutil.AssertEqual(t, snapshotIndex, status.SnapshotIndex)
 	testutil.AssertEqual(t, snapshotIndex, status.CommitIndex)
 	testutil.AssertEqual(t, snapshotIndex, status.LastApplied)
+}
+
+// testSingleNodeCluster verifies that a lone node elects itself, commits, and serves reads.
+func testSingleNodeCluster(t *testing.T, cluster *TestCluster) {
+	t.Helper()
+
+	cluster.tick(cluster.config.Options.ElectionTickCount * 5)
+	leader := cluster.GetNode(cluster.WaitForLeader(t, 5*time.Second))
+
+	index, _, _, err := leader.raft.Propose(context.Background(), []byte("command"))
+	testutil.AssertNoError(t, err)
+
+	cluster.WaitForApplied(t, 1, 5*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	readIndex, err := leader.raft.ReadIndex(ctx)
+	testutil.AssertNoError(t, err)
+	testutil.AssertTrue(t, readIndex >= index, "ReadIndex should include the command")
 }
 
 // testBasicSnapshotting verifies that a snapshot is created when the log size exceeds the threshold.
