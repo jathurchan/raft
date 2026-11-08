@@ -743,6 +743,57 @@ func TestReplicationManager_Propose_ConcurrentCallersGetUniqueIndexes(t *testing
 	}
 }
 
+func TestReplicationManager_VerifyLeadership_ReturnsOnQuorum(t *testing.T) {
+	rm, _, _, networkMgr, _, _ := setupTestReplicationManager(t)
+	defer rm.Stop()
+
+	hungPeerCancelled := make(chan struct{})
+	networkMgr.setSendAppendEntriesFunc(
+		func(ctx context.Context, target types.NodeID, args *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+			if target == "node3" {
+				<-ctx.Done()
+				close(hungPeerCancelled)
+				return nil, ctx.Err()
+			}
+			return &types.AppendEntriesReply{Term: args.Term, Success: true}, nil
+		},
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := rm.VerifyLeadershipAndGetCommitIndex(ctx)
+
+	testutil.AssertNoError(t, err)
+	testutil.AssertTrue(
+		t,
+		time.Since(start) < time.Second,
+		"verification should not wait for the hung peer",
+	)
+
+	select {
+	case <-hungPeerCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("RPC to the hung peer should be cancelled once quorum is reached")
+	}
+}
+
+func TestReplicationManager_VerifyLeadership_FailsFastWithoutQuorum(t *testing.T) {
+	rm, _, _, networkMgr, _, _ := setupTestReplicationManager(t)
+	defer rm.Stop()
+
+	networkMgr.setSendAppendEntriesFunc(
+		func(ctx context.Context, target types.NodeID, args *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+			return nil, errors.New("peer unreachable")
+		},
+	)
+
+	_, err := rm.VerifyLeadershipAndGetCommitIndex(context.Background())
+
+	testutil.AssertError(t, err)
+}
+
 func TestReplicationManager_VerifyLeadershipAndGetCommitIndex(t *testing.T) {
 	t.Run("FastPathWithValidLease", func(t *testing.T) {
 		rm, _, stateMgr, _, _, clock := setupTestReplicationManager(t)
