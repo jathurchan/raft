@@ -45,7 +45,9 @@ type Options struct {
 	HeartbeatTickCount int
 
 	// ElectionRandomizationFactor adds jitter to election timeouts to prevent split votes.
-	// The timeout is randomized between ElectionTickCount and ElectionTickCount * (1 + ElectionRandomizationFactor).
+	// The timeout is randomized between ElectionTickCount and
+	// ElectionTickCount * (1 + 2*ElectionRandomizationFactor), skewed toward lower values,
+	// plus a small per-node offset. Values below 1.0 are replaced with the default.
 	ElectionRandomizationFactor float64
 
 	// MaxLogEntriesPerRequest limits the number of entries per AppendEntries RPC.
