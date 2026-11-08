@@ -1255,6 +1255,34 @@ func TestDefaultHandleElectionTimeout_PreVote(t *testing.T) {
 		testutil.AssertEqual(t, types.Term(9), stateMgr.currentTerm)
 	})
 
+	t.Run("treats failed RPCs as refusals", func(t *testing.T) {
+		em, stateMgr, networkMgr, started := setup(t, true, 5)
+		networkMgr.sendRequestVoteFunc = func(ctx context.Context, target types.NodeID, args *types.RequestVoteArgs) (*types.RequestVoteReply, error) {
+			return nil, errors.New("peer unreachable")
+		}
+
+		em.defaultHandleElectionTimeout(context.Background())
+
+		testutil.AssertFalse(t, started.Load(), "election should not start")
+		testutil.AssertEqual(t, types.Term(5), stateMgr.currentTerm)
+	})
+
+	t.Run("gives up when the context ends", func(t *testing.T) {
+		em, _, networkMgr, started := setup(t, true, 5)
+		release := make(chan struct{})
+		defer close(release)
+		networkMgr.sendRequestVoteFunc = func(ctx context.Context, target types.NodeID, args *types.RequestVoteArgs) (*types.RequestVoteReply, error) {
+			<-release
+			return nil, ctx.Err()
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+		em.defaultHandleElectionTimeout(ctx)
+
+		testutil.AssertFalse(t, started.Load(), "election should not start")
+	})
+
 	t.Run("proceeds without peers answering when disabled", func(t *testing.T) {
 		em, _, networkMgr, started := setup(t, false, 5)
 		em.preVoteEnabled = false
