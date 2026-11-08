@@ -123,6 +123,8 @@ type electionManager struct {
 	handleElectionTimeout func(ctx context.Context) // Handles election timeout logic
 	startElection         func(ctx context.Context) // Begins a real election
 
+	preVoteEnabled bool // Whether to check for a winnable election before raising the term
+
 	timerMu sync.Mutex // Serializes access to pre-vote/election delay timers to prevent overlapping triggers
 
 	electionStartDelay time.Duration // Random delay before starting election after pre-vote
@@ -184,6 +186,7 @@ func NewElectionManager(deps ElectionManagerDeps) (ElectionManager, error) {
 		clock:             deps.Clock,
 
 		electionTickCount:   opts.ElectionTickCount,
+		preVoteEnabled:      deps.Config.FeatureFlags.EnablePreVote,
 		randomizationFactor: opts.ElectionRandomizationFactor,
 
 		electionStartDelay: time.Duration(nodeBasedSeed%100)*time.Millisecond +
@@ -468,14 +471,88 @@ func (em *electionManager) defaultHandleElectionTimeout(ctx context.Context) {
 		return
 	}
 
+	em.resetElectionTimeoutPeriod()
+
+	if em.preVoteEnabled && !em.runPreVote(ctx, currentTerm) {
+		return
+	}
+
 	em.lastElectionTime.Store(now)
 	em.electionCount.Add(1)
 
 	em.trackElectionAttempt(currentTerm)
 
 	em.electionState.Store(int32(ElectionStateVoting))
-	em.resetElectionTimeoutPeriod()
 	em.startElection(ctx)
+}
+
+// runPreVote asks peers whether they would grant a vote in the next term, without
+// changing any state. It reports whether a quorum would, and whether this node is
+// still in currentTerm afterwards.
+func (em *electionManager) runPreVote(ctx context.Context, currentTerm types.Term) bool {
+	type preVoteReply struct {
+		peer  types.NodeID
+		reply *types.RequestVoteReply
+	}
+
+	lastIndex, lastTerm := em.logMgr.GetConsistentLastState()
+	args := &types.RequestVoteArgs{
+		Term:         currentTerm + 1,
+		CandidateID:  em.id,
+		LastLogIndex: lastIndex,
+		LastLogTerm:  lastTerm,
+		IsPreVote:    true,
+	}
+
+	rpcCtx, cancel := context.WithTimeout(ctx, preVoteRequestTimeout)
+	defer cancel()
+
+	peerCount := len(em.peers) - 1
+	replies := make(chan preVoteReply, peerCount)
+	for peerID := range em.peers {
+		if peerID == em.id {
+			continue
+		}
+		go func(peer types.NodeID) {
+			reply, err := em.networkMgr.SendRequestVote(rpcCtx, peer, args)
+			if err != nil {
+				reply = nil
+			}
+			replies <- preVoteReply{peer: peer, reply: reply}
+		}(peerID)
+	}
+
+	granted := 1 // This node would vote for itself
+	for granted < em.quorumSize {
+		if peerCount == 0 {
+			break
+		}
+		peerCount--
+
+		select {
+		case result := <-replies:
+			if result.reply == nil {
+				continue
+			}
+			if result.reply.Term > currentTerm {
+				em.stateMgr.CheckTermAndStepDown(rpcCtx, result.reply.Term, result.peer)
+				return false
+			}
+			if result.reply.VoteGranted {
+				granted++
+			}
+		case <-rpcCtx.Done():
+			return false
+		}
+	}
+
+	if granted < em.quorumSize {
+		em.logger.Debugw("Pre-vote did not reach quorum", "nodeID", em.id, "term", currentTerm)
+		return false
+	}
+
+	term, role, _ := em.stateMgr.GetState()
+	return term == currentTerm && role != types.RoleLeader
 }
 
 // trackElectionAttempt records the current election attempt for split vote analysis.
@@ -963,6 +1040,32 @@ func (em *electionManager) sendVoteRequest(
 	em.processVoteReply(peer, args.Term, currentTerm, reply)
 }
 
+// handlePreVote reports whether this node would vote for the candidate, without
+// changing any state. It refuses while a leader appears to be healthy.
+func (em *electionManager) handlePreVote(args *types.RequestVoteArgs) *types.RequestVoteReply {
+	currentTerm, role, leaderID := em.stateMgr.GetState()
+	reply := &types.RequestVoteReply{Term: currentTerm, VoteGranted: false}
+
+	if args.Term <= currentTerm || role == types.RoleLeader {
+		return reply
+	}
+
+	if leaderID != unknownNodeID {
+		em.timerMu.Lock()
+		elapsed := em.electionElapsed
+		em.timerMu.Unlock()
+
+		if elapsed < em.electionTickCount {
+			return reply
+		}
+	}
+
+	lastIndex, lastTerm := em.logMgr.GetConsistentLastState()
+	reply.VoteGranted = em.isLogUpToDate(args.LastLogTerm, args.LastLogIndex, lastTerm, lastIndex)
+
+	return reply
+}
+
 // HandleRequestVote processes an incoming vote request.
 func (em *electionManager) HandleRequestVote(
 	ctx context.Context,
@@ -983,6 +1086,10 @@ func (em *electionManager) HandleRequestVote(
 			"from", args.CandidateID,
 			"nodeID", em.id)
 		return &types.RequestVoteReply{Term: term, VoteGranted: false}, ErrShuttingDown
+	}
+
+	if args.IsPreVote {
+		return em.handlePreVote(args), nil
 	}
 
 	reply := &types.RequestVoteReply{VoteGranted: false}

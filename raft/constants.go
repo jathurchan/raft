@@ -132,6 +132,9 @@ const (
 	// Maximum number of concurrent elections allowed.
 	maxConcurrentElections = 3
 
+	// Timeout for the pre-vote round before an election.
+	preVoteRequestTimeout = 500 * time.Millisecond
+
 	// Timeout for sending a vote request.
 	voteRequestTimeout = 15 * time.Second
 
