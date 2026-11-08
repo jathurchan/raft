@@ -91,6 +91,7 @@ type Raft interface {
 	//
 	// A notification is sent when the node learns about a new leader or when leadership is lost.
 	// The notification carries the NodeID of the new leader, or an empty NodeID if there is no known leader.
+	// If the application falls behind, the oldest notifications are dropped so the newest is always delivered.
 	//
 	// The channel remains open during normal operation and is closed after Stop() completes.
 	LeaderChangeChannel() <-chan types.NodeID
