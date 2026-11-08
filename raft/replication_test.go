@@ -995,6 +995,68 @@ func TestReplicationManager_VerifyLeadership_CountsLaggingPeers(t *testing.T) {
 	})
 }
 
+func TestReplicationManager_RecordLeaseAck(t *testing.T) {
+	setup := func(t *testing.T, quorumSize int) (*replicationManager, time.Time) {
+		rm, _, _, _, _, clock := setupTestReplicationManager(t)
+		t.Cleanup(rm.Stop)
+		rm.quorumSize = quorumSize
+		return rm, clock.Now()
+	}
+
+	t.Run("one peer does not extend a lease needing two", func(t *testing.T) {
+		rm, now := setup(t, 3)
+
+		rm.mu.Lock()
+		defer rm.mu.Unlock()
+		rm.recordLeaseAck("node2", now)
+
+		testutil.AssertTrue(t, rm.leaseExpiry.IsZero(), "lease needs a quorum of confirmations")
+	})
+
+	t.Run("lease follows the older of a quorum's send times", func(t *testing.T) {
+		rm, now := setup(t, 3)
+		later := now.Add(time.Second)
+
+		rm.mu.Lock()
+		defer rm.mu.Unlock()
+		rm.recordLeaseAck("node2", later)
+		rm.recordLeaseAck("node3", now)
+
+		testutil.AssertEqual(t, now.Add(rm.leaseDuration), rm.leaseExpiry)
+	})
+
+	t.Run("lease never moves backwards", func(t *testing.T) {
+		rm, now := setup(t, 2)
+
+		rm.mu.Lock()
+		defer rm.mu.Unlock()
+		rm.recordLeaseAck("node2", now.Add(time.Second))
+		rm.recordLeaseAck("node3", now)
+
+		testutil.AssertEqual(t, now.Add(time.Second+rm.leaseDuration), rm.leaseExpiry)
+	})
+}
+
+func TestReplicationManager_VerifyLeadership_TimesLeaseFromSend(t *testing.T) {
+	rm, _, _, networkMgr, _, clock := setupTestReplicationManager(t)
+	defer rm.Stop()
+
+	networkMgr.setSendAppendEntriesFunc(
+		func(ctx context.Context, target types.NodeID, args *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+			clock.Advance(time.Second)
+			return &types.AppendEntriesReply{Term: args.Term, Success: true}, nil
+		},
+	)
+
+	sentAt := clock.Now()
+	_, err := rm.VerifyLeadershipAndGetCommitIndex(context.Background())
+	testutil.AssertNoError(t, err)
+
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	testutil.AssertEqual(t, sentAt.Add(rm.leaseDuration), rm.leaseExpiry)
+}
+
 func TestReplicationManager_VerifyLeadershipAndGetCommitIndex(t *testing.T) {
 	t.Run("FastPathWithValidLease", func(t *testing.T) {
 		rm, _, stateMgr, _, _, clock := setupTestReplicationManager(t)

@@ -208,10 +208,11 @@ type replicationManager struct {
 	peerStates       map[types.NodeID]*types.PeerState // Tracks per-peer replication progress
 	heartbeatElapsed int                               // Ticks since last heartbeat broadcast
 
-	leaderLeaseEnabled  bool          // Whether leader lease-based reads are enabled
-	leaseExpiry         time.Time     // Timestamp when the current lease expires
-	leaseDuration       time.Duration // Duration of the leader lease
-	lastQuorumHeartbeat time.Time     // Time of last successful quorum heartbeat
+	leaderLeaseEnabled  bool                       // Whether leader lease-based reads are enabled
+	leaseExpiry         time.Time                  // Timestamp when the current lease expires
+	leaseDuration       time.Duration              // Duration of the leader lease
+	lastQuorumHeartbeat time.Time                  // Send time of the last heartbeat confirmed by a quorum
+	leaseAcks           map[types.NodeID]time.Time // Latest confirmed heartbeat send time per peer
 
 	readReadyTerm atomic.Uint64 // Latest term known to have committed an entry of its own
 
@@ -368,6 +369,7 @@ func (rm *replicationManager) InitializeLeaderState() {
 	if rm.leaderLeaseEnabled {
 		rm.leaseExpiry = time.Time{} // No lease initially
 		rm.lastQuorumHeartbeat = time.Time{}
+		rm.leaseAcks = make(map[types.NodeID]time.Time)
 	}
 
 	rm.logger.Infow("Leader state initialized successfully",
@@ -588,6 +590,7 @@ func (rm *replicationManager) VerifyLeadershipAndGetCommitIndex(
 	rm.logger.Debugw("Verifying leadership with quorum for ReadIndex", "term", term)
 
 	// Send heartbeats and wait for quorum responses
+	sentAt := rm.clock.Now()
 	successCount := rm.sendHeartbeatsAndCountResponses(ctx, term)
 
 	if successCount >= rm.quorumSize-1 { // -1 because we count ourselves
@@ -596,7 +599,7 @@ func (rm *replicationManager) VerifyLeadershipAndGetCommitIndex(
 		// Update lease if enabled
 		if rm.leaderLeaseEnabled {
 			rm.mu.Lock()
-			rm.updateLeaderLease()
+			rm.extendLeaderLease(sentAt)
 			rm.mu.Unlock()
 		}
 
@@ -1204,6 +1207,12 @@ func (rm *replicationManager) replicateToPeerInternal(
 		rm.handleAppendError(peerID, term, err, isHeartbeat, rpcLatency)
 	} else {
 		rm.handleAppendReply(peerID, term, args, reply, isHeartbeat, rpcLatency)
+
+		if isHeartbeat && reply.Term == term {
+			rm.mu.Lock()
+			rm.recordLeaseAck(peerID, startTime)
+			rm.mu.Unlock()
+		}
 	}
 }
 
@@ -1513,11 +1522,6 @@ func (rm *replicationManager) handleAppendReply(
 			// Record metrics
 			if isHeartbeat {
 				rm.metrics.ObserveHeartbeat(peerID, true, rpcLatency)
-
-				// Update leader lease if enabled
-				if rm.leaderLeaseEnabled {
-					rm.updateLeaderLease()
-				}
 			} else {
 				rm.metrics.ObservePeerReplication(peerID, true, ReplicationResultSuccess)
 			}
@@ -1645,17 +1649,48 @@ func (rm *replicationManager) findLastLogEntryWithTerm(term types.Term) (types.I
 	return index, nil
 }
 
-// updateLeaderLease updates the leader lease expiry time
-func (rm *replicationManager) updateLeaderLease() {
+// recordLeaseAck records a peer's confirmation of a heartbeat sent at sentAt, and
+// extends the lease to the latest send time that a quorum has confirmed.
+// Must be called with rm.mu held.
+func (rm *replicationManager) recordLeaseAck(peerID types.NodeID, sentAt time.Time) {
+	needed := rm.quorumSize - 1
+	if !rm.leaderLeaseEnabled || rm.leaseAcks == nil || needed <= 0 {
+		return
+	}
+
+	if sentAt.After(rm.leaseAcks[peerID]) {
+		rm.leaseAcks[peerID] = sentAt
+	}
+	if len(rm.leaseAcks) < needed {
+		return
+	}
+
+	acks := make([]time.Time, 0, len(rm.leaseAcks))
+	for _, ack := range rm.leaseAcks {
+		acks = append(acks, ack)
+	}
+	slices.SortFunc(acks, func(a, b time.Time) int { return b.Compare(a) })
+
+	rm.extendLeaderLease(acks[needed-1])
+}
+
+// extendLeaderLease extends the lease based on a heartbeat send time confirmed by a quorum.
+// Timing from the send keeps the lease within the period followers will not elect a new leader.
+// Must be called with rm.mu held.
+func (rm *replicationManager) extendLeaderLease(sentAt time.Time) {
 	if !rm.leaderLeaseEnabled {
 		return
 	}
 
-	now := rm.clock.Now()
-	rm.lastQuorumHeartbeat = now
-	rm.leaseExpiry = now.Add(rm.leaseDuration)
+	expiry := sentAt.Add(rm.leaseDuration)
+	if !expiry.After(rm.leaseExpiry) {
+		return
+	}
 
-	rm.logger.Debugw("Updated leader lease",
+	rm.lastQuorumHeartbeat = sentAt
+	rm.leaseExpiry = expiry
+
+	rm.logger.Debugw("Extended leader lease",
 		"leaseExpiry", rm.leaseExpiry,
 		"leaseDuration", rm.leaseDuration)
 }
