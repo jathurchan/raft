@@ -1099,10 +1099,12 @@ func (rm *replicationManager) replicateToAllPeers(term types.Term, isHeartbeat b
 		return
 	}
 
+	rm.mu.RLock()
 	peerIDs := make([]types.NodeID, 0, len(rm.peerStates))
 	for peerID := range rm.peerStates {
 		peerIDs = append(peerIDs, peerID)
 	}
+	rm.mu.RUnlock()
 
 	commitIndex := rm.stateMgr.GetCommitIndex()
 
