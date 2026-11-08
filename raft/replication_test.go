@@ -2110,6 +2110,88 @@ func BenchmarkReplicationManager_Propose(b *testing.B) {
 	}
 }
 
+func TestReplicationManager_ReplicationLoop(t *testing.T) {
+	const logLength = 250
+
+	setup := func(t *testing.T) (*replicationManager, *mockNetworkManager) {
+		rm, logMgr, _, networkMgr, _, _ := setupTestReplicationManager(t)
+		t.Cleanup(rm.Stop)
+		for i := types.Index(1); i <= logLength; i++ {
+			logMgr.AddEntry(i, 1, []byte("cmd"))
+		}
+		rm.mu.Lock()
+		for _, peerState := range rm.peerStates {
+			peerState.NextIndex = 1
+		}
+		rm.mu.Unlock()
+		return rm, networkMgr
+	}
+
+	waitForCatchUp := func(t *testing.T, rm *replicationManager) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			rm.mu.RLock()
+			caughtUp := rm.peerStates["node2"].MatchIndex == logLength &&
+				rm.peerStates["node3"].MatchIndex == logLength
+			rm.mu.RUnlock()
+			if caughtUp {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatal("peers should catch up without further proposals")
+	}
+
+	t.Run("keeps sending batches until a peer catches up", func(t *testing.T) {
+		rm, _ := setup(t)
+
+		rm.replicateToAllPeers(1, false)
+
+		waitForCatchUp(t, rm)
+	})
+
+	t.Run("a heartbeat restarts replication for a lagging peer", func(t *testing.T) {
+		rm, _ := setup(t)
+
+		rm.replicateToAllPeers(1, true)
+
+		waitForCatchUp(t, rm)
+	})
+
+	t.Run("sends at most one batch at a time to each peer", func(t *testing.T) {
+		rm, networkMgr := setup(t)
+
+		var mu sync.Mutex
+		inFlight := make(map[types.NodeID]int)
+		maxInFlight := 0
+		networkMgr.setSendAppendEntriesFunc(
+			func(ctx context.Context, target types.NodeID, args *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+				mu.Lock()
+				inFlight[target]++
+				maxInFlight = max(maxInFlight, inFlight[target])
+				mu.Unlock()
+
+				time.Sleep(2 * time.Millisecond)
+
+				mu.Lock()
+				inFlight[target]--
+				mu.Unlock()
+				return &types.AppendEntriesReply{Term: args.Term, Success: true}, nil
+			},
+		)
+
+		for range 20 {
+			rm.replicateToAllPeers(1, false)
+		}
+		waitForCatchUp(t, rm)
+
+		mu.Lock()
+		defer mu.Unlock()
+		testutil.AssertEqual(t, 1, maxInFlight)
+	})
+}
+
 func TestReplicationManager_handleAppendError_DoesNotCountPeerResponses(t *testing.T) {
 	for name, rpcErr := range map[string]error{
 		"canceled by this node":  context.Canceled,

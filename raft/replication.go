@@ -176,6 +176,11 @@ func validateReplicationManagerDeps(deps ReplicationManagerDeps) error {
 	return nil
 }
 
+// peerReplicationLoop tracks a running replication loop for one peer.
+type peerReplicationLoop struct {
+	recheck bool // Set when new entries may have arrived while the loop was sending
+}
+
 // pendingProposal is a command waiting to be appended to the log.
 type pendingProposal struct {
 	command []byte
@@ -219,6 +224,9 @@ type replicationManager struct {
 
 	readReadyTerm atomic.Uint64 // Latest term known to have committed an entry of its own
 
+	replicationLoopsMu sync.Mutex                            // Protects replicationLoops
+	replicationLoops   map[types.NodeID]*peerReplicationLoop // Running loop per peer
+
 	proposeMu       sync.Mutex         // Protects proposeQueue and proposeFlushing
 	proposeQueue    []*pendingProposal // Proposals waiting to be appended
 	proposeFlushing bool               // Whether a flush is currently running
@@ -256,6 +264,7 @@ func NewReplicationManager(deps ReplicationManagerDeps) (ReplicationManager, err
 		clock:       deps.Clock,
 
 		peerStates:       make(map[types.NodeID]*types.PeerState),
+		replicationLoops: make(map[types.NodeID]*peerReplicationLoop),
 		heartbeatElapsed: 0,
 
 		leaderLeaseEnabled: deps.Cfg.FeatureFlags.EnableLeaderLease,
@@ -1133,7 +1142,50 @@ func (rm *replicationManager) replicateToAllPeers(term types.Term, isHeartbeat b
 
 	// Start replication to each peer concurrently
 	for _, peerID := range peerIDs {
-		go rm.replicateToPeerInternal(context.Background(), peerID, term, commitIndex, isHeartbeat)
+		if isHeartbeat {
+			go rm.replicateToPeerInternal(context.Background(), peerID, term, commitIndex, true)
+		}
+		// Heartbeats also restart replication to a peer whose last batch failed.
+		go rm.replicateEntriesToPeer(peerID, term)
+	}
+}
+
+// replicateEntriesToPeer sends log batches to a peer until it catches up or a batch
+// makes no progress. Only one loop runs per peer, so a slow follower is not flooded;
+// a call made while one is running asks it to check for new entries.
+func (rm *replicationManager) replicateEntriesToPeer(peerID types.NodeID, term types.Term) {
+	rm.replicationLoopsMu.Lock()
+	if loop, running := rm.replicationLoops[peerID]; running {
+		loop.recheck = true
+		rm.replicationLoopsMu.Unlock()
+		return
+	}
+	loop := &peerReplicationLoop{}
+	rm.replicationLoops[peerID] = loop
+	rm.replicationLoopsMu.Unlock()
+
+	for {
+		nextBefore, _, _ := rm.getPeerReplicationState(peerID)
+		rm.replicateToPeerInternal(
+			context.Background(),
+			peerID,
+			term,
+			rm.stateMgr.GetCommitIndex(),
+			false,
+		)
+		nextAfter, _, _ := rm.getPeerReplicationState(peerID)
+		currentTerm, role, _ := rm.stateMgr.GetState()
+
+		rm.replicationLoopsMu.Lock()
+		keepGoing := (loop.recheck || nextAfter != nextBefore) &&
+			!rm.isShutdown.Load() && role == types.RoleLeader && currentTerm == term
+		loop.recheck = false
+		if !keepGoing {
+			delete(rm.replicationLoops, peerID)
+			rm.replicationLoopsMu.Unlock()
+			return
+		}
+		rm.replicationLoopsMu.Unlock()
 	}
 }
 
