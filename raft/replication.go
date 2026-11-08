@@ -289,6 +289,7 @@ func NewReplicationManager(deps ReplicationManagerDeps) (ReplicationManager, err
 		"quorumSize", deps.QuorumSize,
 		"leaderLease", rm.leaderLeaseEnabled)
 
+	rm.commitLoopWg.Add(1)
 	go rm.commitCheckLoop()
 
 	return rm, nil
@@ -745,7 +746,6 @@ func (rm *replicationManager) sendSingleHeartbeatAndWait(
 
 // commitCheckLoop processes commit index advancement requests in background
 func (rm *replicationManager) commitCheckLoop() {
-	rm.commitLoopWg.Add(1)       // Increment counter when loop starts
 	defer rm.commitLoopWg.Done() // Decrement counter when loop exits
 
 	defer rm.logger.Debugw("Commit check loop terminated")
