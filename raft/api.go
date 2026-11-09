@@ -78,13 +78,12 @@ type Raft interface {
 	// The application’s state machine will eventually reflect at least this index.
 	GetCommitIndex() types.Index
 
-	// ApplyChannel returns a read-only channel delivering committed log entries and snapshots.
+	// ApplyChannel returns a read-only channel of best-effort notifications for applied commands.
 	//
-	// Each ApplyMsg signals either a committed command (CommandValid = true)
-	// or a snapshot being installed (SnapshotValid = true).
+	// Delivery is not guaranteed: when the channel is full, notifications are dropped and
+	// Raft continues. Use the Applier, not this channel, to update application state.
 	//
-	// The channel must be continuously drained to avoid blocking Raft's internal processing.
-	// It remains open during normal operation and is closed only after Stop() completes.
+	// The channel remains open during normal operation and is closed only after Stop() completes.
 	ApplyChannel() <-chan types.ApplyMsg
 
 	// LeaderChangeChannel returns a read-only channel delivering leader change notifications.
