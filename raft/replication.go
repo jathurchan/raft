@@ -1309,7 +1309,15 @@ func (rm *replicationManager) initiateSnapshotIfNeeded(
 		"nextIndex", nextIndex,
 		"firstLogIndex", firstLogIndex)
 
-	rm.SetPeerSnapshotInProgress(peerID, true)
+	rm.mu.Lock()
+	state, exists := rm.peerStates[peerID]
+	if !exists || state.SnapshotInProgress {
+		rm.mu.Unlock()
+		return
+	}
+	state.SnapshotInProgress = true
+	rm.mu.Unlock()
+
 	go rm.snapshotMgr.SendSnapshot(context.Background(), peerID, term)
 }
 
@@ -1571,6 +1579,7 @@ func (rm *replicationManager) handleAppendReply(
 			if len(args.Entries) > 0 {
 				// Update replication indices
 				lastEntryIndex := args.Entries[len(args.Entries)-1].Index
+				peerState.NextIndex = max(peerState.NextIndex, lastEntryIndex+1)
 				if lastEntryIndex > peerState.MatchIndex {
 					oldMatchIndex := peerState.MatchIndex
 					peerState.MatchIndex = lastEntryIndex
@@ -2031,7 +2040,7 @@ func (rm *replicationManager) UpdatePeerAfterSnapshotSend(
 	if snapshotIndex > peerState.MatchIndex {
 		peerState.MatchIndex = snapshotIndex
 	}
-	peerState.NextIndex = snapshotIndex + 1
+	peerState.NextIndex = peerState.MatchIndex + 1
 	peerState.SnapshotInProgress = false
 	peerState.IsActive = true
 	peerState.LastActive = rm.clock.Now()
