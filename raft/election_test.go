@@ -1297,6 +1297,44 @@ func TestDefaultHandleElectionTimeout_PreVote(t *testing.T) {
 	})
 }
 
+func TestHandleRequestVote_DeniedVoteDoesNotResetElectionTimer(t *testing.T) {
+	em, stateMgr, logMgr, _, _, _, _ := createTestElectionManager(t)
+	stateMgr.currentTerm = 2
+	stateMgr.currentRole = types.RoleFollower
+	logMgr.lastIndex = 20
+	logMgr.lastTerm = 2
+	em.electionElapsed = 7
+
+	reply, err := em.HandleRequestVote(context.Background(), &types.RequestVoteArgs{
+		Term: 3, CandidateID: "node2", LastLogIndex: 5, LastLogTerm: 1,
+	})
+
+	testutil.AssertNoError(t, err)
+	testutil.AssertFalse(t, reply.VoteGranted, "a candidate with an old log must be refused")
+	testutil.AssertEqual(t, types.Term(3), stateMgr.currentTerm)
+	testutil.AssertEqual(t, 7, em.electionElapsed, "a refused candidate must not reset the timer")
+}
+
+func TestElectionTimeout_DoesNotCountAsHearingFromLeader(t *testing.T) {
+	em, stateMgr, _, networkMgr, _, clock, _ := createTestElectionManager(t)
+	clock.Advance(time.Minute)
+	stateMgr.currentTerm = 5
+	stateMgr.currentRole = types.RoleFollower
+	stateMgr.leaderID = "node3"
+	em.preVoteEnabled = true
+	em.ticksSinceLeader = em.electionTickCount
+	networkMgr.sendRequestVoteFunc = func(ctx context.Context, target types.NodeID, args *types.RequestVoteArgs) (*types.RequestVoteReply, error) {
+		return &types.RequestVoteReply{Term: 5, VoteGranted: false}, nil
+	}
+
+	em.defaultHandleElectionTimeout(context.Background())
+
+	reply := em.handlePreVote(&types.RequestVoteArgs{
+		Term: 6, CandidateID: "node2", LastLogIndex: 100, LastLogTerm: 5,
+	})
+	testutil.AssertTrue(t, reply.VoteGranted, "an expired timer must not block other candidates")
+}
+
 func TestHandleRequestVote_HigherTermDoesNotRecordCandidateAsLeader(t *testing.T) {
 	em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
 	stateMgr.currentTerm = 2
@@ -1318,7 +1356,7 @@ func TestHandleRequestVote_PreVote(t *testing.T) {
 		stateMgr.votedFor = "node3"
 		logMgr.lastIndex = 10
 		logMgr.lastTerm = 5
-		em.electionElapsed = em.electionTickCount
+		em.ticksSinceLeader = em.electionTickCount
 		return em, stateMgr, &types.RequestVoteArgs{
 			Term:         6,
 			CandidateID:  "node2",
@@ -1350,7 +1388,7 @@ func TestHandleRequestVote_PreVote(t *testing.T) {
 	t.Run("denies while a leader was heard recently", func(t *testing.T) {
 		em, stateMgr, args := setup(t)
 		stateMgr.leaderID = "node3"
-		em.electionElapsed = 0
+		em.ticksSinceLeader = 0
 
 		assertDenied(t, em, args)
 	})
