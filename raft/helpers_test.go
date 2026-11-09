@@ -239,6 +239,17 @@ func (ms *mockStorage) TruncateLogSuffix(ctx context.Context, index types.Index)
 	return nil
 }
 
+func (ms *mockStorage) ResetLog(ctx context.Context, entry types.LogEntry) error {
+	if err := ms.checkFailure("ResetLog"); err != nil {
+		return err
+	}
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ms.log = []types.LogEntry{entry}
+	ms.firstLogIndex = entry.Index
+	return nil
+}
+
 func (ms *mockStorage) TruncateLogPrefix(ctx context.Context, index types.Index) error {
 	if err := ms.checkFailure("TruncateLogPrefix"); err != nil {
 		return err
@@ -1790,6 +1801,13 @@ func (m *mockLogManager) GetLogStateForDebugging() LogDebugState {
 		StorageMetrics:  nil,
 		LastChecked:     time.Now(),
 	}
+}
+
+func (m *mockLogManager) InstallSnapshotBoundary(
+	ctx context.Context,
+	meta types.SnapshotMetadata,
+) error {
+	return m.TruncatePrefix(ctx, meta.LastIncludedIndex)
 }
 
 func (m *mockLogManager) RestoreFromSnapshot(

@@ -386,7 +386,7 @@ func TestRaftSnapshot_MaybeTruncateLog_LogsWarningOnFailure(t *testing.T) {
 		return fmt.Errorf("fail to truncate")
 	}
 
-	sm.maybeTruncateLog(context.Background(), 10)
+	sm.maybeTruncateLog(context.Background(), types.SnapshotMetadata{LastIncludedIndex: 10, LastIncludedTerm: 1})
 
 	if !wasCalled {
 		t.Errorf("Expected truncatePrefixFunc to be called")
@@ -883,7 +883,7 @@ func TestRaftSnapshot_SnapshotManager_MaybeTriggerLogCompaction(t *testing.T) {
 			snapshotMeta:          baseSnapshotMeta,
 			logLastIndex:          20,
 			expectTruncate:        true,
-			expectedTruncateIndex: 11, // baseSnapshotMeta.LastIncludedIndex + 1
+			expectedTruncateIndex: 10, // Keeps the entry at the snapshot index
 		},
 		{
 			name:                  "CompactionTriggered_ExactEntries",
@@ -891,7 +891,7 @@ func TestRaftSnapshot_SnapshotManager_MaybeTriggerLogCompaction(t *testing.T) {
 			snapshotMeta:          baseSnapshotMeta,
 			logLastIndex:          15, // entriesAfterSnapshot = 15 - 10 = 5. 5 >= 5.
 			expectTruncate:        true,
-			expectedTruncateIndex: 11,
+			expectedTruncateIndex: 10,
 		},
 		{
 			name:             "CompactionNotTriggered_NotEnoughEntries",
@@ -923,7 +923,7 @@ func TestRaftSnapshot_SnapshotManager_MaybeTriggerLogCompaction(t *testing.T) {
 			},
 			logLastIndex:          5, // entriesAfterSnapshot = 5 - 0 = 5. 5 >= 3.
 			expectTruncate:        true,
-			expectedTruncateIndex: 1, // 0 + 1
+			expectedTruncateIndex: 0,
 		},
 		{
 			name:             "CompactionNotTriggered_LogEndsAtSnapshotIndex",
@@ -938,7 +938,7 @@ func TestRaftSnapshot_SnapshotManager_MaybeTriggerLogCompaction(t *testing.T) {
 			snapshotMeta:          baseSnapshotMeta,
 			logLastIndex:          20,
 			expectTruncate:        true, // It will be called
-			expectedTruncateIndex: 11,
+			expectedTruncateIndex: 10,
 			truncateShouldError:   true, // Simulate logMgr.TruncatePrefix error
 		},
 	}
@@ -1277,7 +1277,7 @@ func TestRaftSnapshot_EdgeCases(t *testing.T) {
 		logMgr := sm.logMgr.(*mockLogManager)
 		logMgr.lastIndex = 10
 		logMgr.firstIndex = 1
-		sm.maybeTruncateLog(context.Background(), 5)
+		sm.maybeTruncateLog(context.Background(), types.SnapshotMetadata{LastIncludedIndex: 5, LastIncludedTerm: 1})
 	})
 
 	t.Run("createSnapshot skips when already in progress or shutdown", func(t *testing.T) {
@@ -1319,12 +1319,12 @@ func TestRaftSnapshot_EdgeCases(t *testing.T) {
 
 	t.Run("truncateLogAfterSnapshot zero index and success", func(t *testing.T) {
 		sm, _, _, _, _ := setupSnapshotManager(t)
-		sm.truncateLogAfterSnapshot(context.Background(), 0)
+		sm.truncateLogAfterSnapshot(context.Background(), types.SnapshotMetadata{})
 
 		logMgr := sm.logMgr.(*mockLogManager)
 		logMgr.lastIndex = 10
 		logMgr.firstIndex = 1
-		sm.truncateLogAfterSnapshot(context.Background(), 5)
+		sm.truncateLogAfterSnapshot(context.Background(), types.SnapshotMetadata{LastIncludedIndex: 5, LastIncludedTerm: 1})
 	})
 
 	t.Run("SendSnapshot shutdown and leadership lost and RPC timeout/canceled", func(t *testing.T) {
@@ -1376,3 +1376,4 @@ func TestRaftSnapshot_EdgeCases(t *testing.T) {
 		testutil.AssertErrorIs(t, err, ErrShuttingDown)
 	})
 }
+

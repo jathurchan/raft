@@ -68,6 +68,10 @@ type Storage interface {
 	//   - context.Canceled or context.DeadlineExceeded if the context is canceled or expired.
 	TruncateLogPrefix(ctx context.Context, index types.Index) error
 
+	// ResetLog discards the whole log and replaces it with the given entry. It is used
+	// when an installed snapshot cannot be connected to the existing log.
+	ResetLog(ctx context.Context, entry types.LogEntry) error
+
 	// SaveSnapshot persists a snapshot and its metadata atomically.
 	// The snapshot should represent the full compacted state at a specific log index.
 	//
