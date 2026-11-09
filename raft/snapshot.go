@@ -722,7 +722,7 @@ func (sm *snapshotManager) processInstallSnapshot(
 	args *types.InstallSnapshotArgs,
 ) (*types.InstallSnapshotReply, error) { //
 	steppedDown, _ := sm.stateMgr.CheckTermAndStepDown(ctx, args.Term, args.LeaderID)
-	currentTerm, currentRole, _ := sm.stateMgr.GetState()
+	currentTerm, currentRole, currentLeader := sm.stateMgr.GetState()
 	reply := &types.InstallSnapshotReply{Term: currentTerm}
 
 	if args.Term < currentTerm {
@@ -737,7 +737,7 @@ func (sm *snapshotManager) processInstallSnapshot(
 		return reply, nil
 	}
 
-	if steppedDown || currentRole != types.RoleFollower {
+	if steppedDown || currentRole != types.RoleFollower || currentLeader != args.LeaderID {
 		sm.logger.Infow(
 			"Becoming follower due to InstallSnapshot RPC",
 			"term",

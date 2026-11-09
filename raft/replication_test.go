@@ -2195,6 +2195,21 @@ func TestReplicationManager_SnapshotBoundary(t *testing.T) {
 		testutil.AssertEqual(t, types.Index(13), rm.peerStates["node2"].NextIndex)
 	})
 
+	t.Run("a follower learns the leader from AppendEntries in the same term", func(t *testing.T) {
+		rm, _, stateMgr, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		stateMgr.mu.Lock()
+		stateMgr.currentRole = types.RoleFollower
+		stateMgr.leaderID = ""
+		stateMgr.mu.Unlock()
+
+		_, err := rm.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{Term: 1, LeaderID: "node3"})
+
+		testutil.AssertNoError(t, err)
+		_, _, leader := stateMgr.GetState()
+		testutil.AssertEqual(t, types.NodeID("node3"), leader)
+	})
+
 	t.Run("sends a snapshot to a peer that needs the boundary entry", func(t *testing.T) {
 		rm, logMgr, _, networkMgr, snapshotMgr, _ := setupTestReplicationManager(t)
 		defer rm.Stop()

@@ -564,9 +564,9 @@ func TestHandleRequestVote(t *testing.T) {
 		)
 		testutil.AssertEqual(
 			t,
-			types.NodeID("node2"),
+			unknownNodeID,
 			stateMgr.leaderID,
-			"StateManager leaderID should update to candidateID",
+			"StateManager leaderID should be unknown after a higher-term vote request",
 		)
 		testutil.AssertEqual(
 			t,
@@ -1295,6 +1295,19 @@ func TestDefaultHandleElectionTimeout_PreVote(t *testing.T) {
 
 		testutil.AssertTrue(t, started.Load(), "election should start")
 	})
+}
+
+func TestHandleRequestVote_HigherTermDoesNotRecordCandidateAsLeader(t *testing.T) {
+	em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
+	stateMgr.currentTerm = 2
+	stateMgr.currentRole = types.RoleFollower
+	stateMgr.leaderID = "node3"
+
+	_, err := em.HandleRequestVote(context.Background(), &types.RequestVoteArgs{Term: 3, CandidateID: "node2"})
+
+	testutil.AssertNoError(t, err)
+	_, _, leader := stateMgr.GetState()
+	testutil.AssertEqual(t, types.NodeID(""), leader)
 }
 
 func TestHandleRequestVote_PreVote(t *testing.T) {
