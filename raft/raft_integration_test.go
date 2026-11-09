@@ -112,9 +112,8 @@ func TestRaftIntegration(t *testing.T) {
 	t.Run("ReadIndex-After-Failover", func(t *testing.T) {
 		cfg := defaultTestConfig()
 		cfg.FeatureFlags = FeatureFlags{
-			EnableReadIndex:   true,
 			EnableLeaderLease: false,
-		}.WithExplicitFlags()
+		}
 		cluster := NewTestCluster(t, 3, cfg)
 		defer cluster.Stop()
 
@@ -867,9 +866,8 @@ func defaultTestConfig() Config {
 			LogCompactionMinEntries:     500,
 		},
 		FeatureFlags: FeatureFlags{
-			EnableReadIndex:   true,
 			EnableLeaderLease: true,
-		}.WithExplicitFlags(),
+		},
 	}
 }
 

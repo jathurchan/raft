@@ -365,9 +365,8 @@ func createRaftNode(nodeID types.NodeID, listenAddr string, peers map[types.Node
             SnapshotThreshold:     100, // Snapshot after 100 entries
         },
         FeatureFlags: raft.FeatureFlags{
-            EnableReadIndex:   true,
             EnableLeaderLease: true,
-        }.WithExplicitFlags(),
+        },
     }
 
     storageInstance, err := storage.NewFileStorage(
@@ -501,7 +500,6 @@ type Options struct {
     ApplyEntryTimeout     time.Duration // Max time to apply one log entry to state machine (default: 5s).
     FetchEntriesTimeout   time.Duration // Max time to fetch log entries from storage (default: 5s).
     LogCompactionMinEntries int         // Min log entries after snapshot before compaction (default: 5000).
-    // StorageSyncDelay and ApplyTickCount are deprecated and have no effect.
 }
 ```
 
@@ -513,13 +511,12 @@ Toggles for enabling/disabling specific Raft protocol optimizations:
 
 ```go
 type FeatureFlags struct {
-    EnableReadIndex   bool // Deprecated: no effect. ReadIndex is always available.
     EnableLeaderLease bool // Enables leader lease for faster ReadIndex (default: false).
     EnablePreVote     bool // Checks that an election is winnable before raising the term (default: false).
 }
 ```
 
-Flags are used exactly as set, so a flag left unset is off. `WithExplicitFlags()` is deprecated and has no effect.
+Flags are used exactly as set, so a flag left unset is off. `ReadIndex` is always available.
 *Source: `raft/config.go`*
 
 ### Tuning Parameters
@@ -646,7 +643,6 @@ If `EnableLeaderLease` is set (`raft/config.go`), the leader can serve `ReadInde
 ```go
 // In your Raft Config:
 config.FeatureFlags = raft.FeatureFlags{
-    EnableReadIndex:   true,
     EnableLeaderLease: true,
-}.WithExplicitFlags()
+}
 ```

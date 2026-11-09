@@ -56,16 +56,8 @@ type Options struct {
 	// SnapshotThreshold controls when to trigger snapshotting based on the log size.
 	SnapshotThreshold int
 
-	// Deprecated: StorageSyncDelay has no effect. Durability is controlled by the storage
-	// layer, for example FileStorageOptions.SyncOnAppend.
-	StorageSyncDelay int
-
 	// LogCompactionMinEntries is the minimum number of entries needed beyond a snapshot index to allow compaction.
 	LogCompactionMinEntries int
-
-	// Deprecated: ApplyTickCount has no effect. Committed entries are applied as soon as
-	// they commit.
-	ApplyTickCount int
 
 	// ApplyEntryTimeout sets a maximum duration for applying a single entry to the state machine.
 	ApplyEntryTimeout time.Duration
@@ -77,9 +69,6 @@ type Options struct {
 // FeatureFlags enables optional Raft features and optimizations.
 // Flags are used exactly as set, so a flag left unset is off.
 type FeatureFlags struct {
-	// Deprecated: EnableReadIndex has no effect. ReadIndex is always available.
-	EnableReadIndex bool
-
 	// EnableLeaderLease enables leader leases for low-latency reads.
 	EnableLeaderLease bool
 
@@ -98,9 +87,4 @@ type TuningParams struct {
 	// 0 disables chunking, so the whole snapshot must fit in one gRPC message.
 	// Enable only when every node in the cluster supports chunked transfer.
 	MaxSnapshotChunkSize int
-}
-
-// Deprecated: WithExplicitFlags returns f unchanged. Flags are always used as set.
-func (f FeatureFlags) WithExplicitFlags() FeatureFlags {
-	return f
 }
