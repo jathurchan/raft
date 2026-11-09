@@ -600,9 +600,6 @@ func (r *raftNode) determineApplyRange(
 	nextApplyIdx := lastAppliedIdx + 1
 
 	batchLimit := types.Index(DefaultMaxApplyBatchSize)
-	if batchLimit <= 0 {
-		batchLimit = 10
-	}
 
 	endIdx := nextApplyIdx + batchLimit
 	if endIdx > commitIdx+1 {

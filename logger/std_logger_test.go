@@ -405,8 +405,26 @@ func TestStdLogger_EmptyContext(t *testing.T) {
 	}
 }
 
-func TestStdLogger_FatalSkipped(t *testing.T) {
-	t.Skip("Fatalw testing skipped as it calls os.Exit(1)")
+func TestStdLogger_Fatalw(t *testing.T) {
+	origExit := osExit
+	defer func() { osExit = origExit }()
+
+	exitCode := 0
+	osExit = func(code int) {
+		exitCode = code
+	}
+
+	logger := NewStdLogger("debug")
+	output := captureLogOutput(func() {
+		logger.Fatalw("fatal error occurred", "code", 500)
+	})
+
+	if exitCode != 1 {
+		t.Errorf("Expected exit code 1, got %d", exitCode)
+	}
+	if !strings.Contains(output, "[FATAL] fatal error occurred code=500") {
+		t.Errorf("Expected fatal log output, got %q", output)
+	}
 }
 
 func TestStdLogger_WithOddKeyValues(t *testing.T) {

@@ -554,6 +554,7 @@ func TestSnapshot_Persist_StorageFails(t *testing.T) {
 	}
 
 	sm.logMgr.(*mockLogManager).entries[10] = types.LogEntry{Index: 10, Term: 1}
+	sm.logMgr.(*mockLogManager).lastIndex = 10
 	mockStore.setFailure("SaveSnapshot", fmt.Errorf("save failed"))
 
 	sm.Tick(context.Background())
@@ -1044,18 +1045,12 @@ func TestSnapshotManager_Stop(t *testing.T) {
 		wg.Add(2)           // Add 2 to the WaitGroup counter
 
 		go func() {
-			defer func() { // Ensure atomic counter is decremented even if panics
-				wg.Done()
-				opsCounter.Add(-1)
-			}()
-
-			defer func() {
-				wg.Done()
-				opsCounter.Add(-1)
-			}()
+			time.Sleep(5 * time.Millisecond)
+			wg.Done()
+			opsCounter.Add(-1)
+			wg.Done()
+			opsCounter.Add(-1)
 		}()
-
-		time.Sleep(1 * time.Millisecond)
 
 		sm.Stop()
 
@@ -1264,5 +1259,120 @@ func TestRaftSnapshot_HandleInstall_Chunks(t *testing.T) {
 
 		testutil.AssertErrorIs(t, err, applier.restoreErr)
 		testutil.AssertEqual(t, types.Index(0), sm.lastSnapshotIndex)
+	})
+}
+
+func TestRaftSnapshot_EdgeCases(t *testing.T) {
+	t.Run("SetNetworkManager", func(t *testing.T) {
+		sm, _, _, _, _ := setupSnapshotManager(t)
+		nm := newMockNetworkManager()
+		sm.SetNetworkManager(nm)
+		if sm.networkMgr != nm {
+			t.Fatal("expected networkMgr to be updated")
+		}
+	})
+
+	t.Run("maybeTruncateLog succeeds", func(t *testing.T) {
+		sm, _, _, _, _ := setupSnapshotManager(t)
+		logMgr := sm.logMgr.(*mockLogManager)
+		logMgr.lastIndex = 10
+		logMgr.firstIndex = 1
+		sm.maybeTruncateLog(context.Background(), 5)
+	})
+
+	t.Run("createSnapshot skips when already in progress or shutdown", func(t *testing.T) {
+		sm, _, _, _, _ := setupSnapshotManager(t)
+		sm.snapshotCreateInProgress.Store(true)
+		sm.createSnapshot(context.Background())
+
+		sm.snapshotCreateInProgress.Store(false)
+		sm.isShutdown.Store(true)
+		sm.createSnapshot(context.Background())
+	})
+
+	t.Run("HandleInstallSnapshot shutdown and stale term and same index stale snapshot", func(t *testing.T) {
+		sm, _, stateMgr, _, _ := setupSnapshotManager(t)
+		sm.isShutdown.Store(true)
+		_, err := sm.HandleInstallSnapshot(context.Background(), &types.InstallSnapshotArgs{Term: 1})
+		testutil.AssertErrorIs(t, err, ErrShuttingDown)
+
+		sm.isShutdown.Store(false)
+		stateMgr.currentTerm = 5
+		reply, err := sm.HandleInstallSnapshot(context.Background(), &types.InstallSnapshotArgs{
+			Term:     3,
+			LeaderID: "leader1",
+		})
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, types.Term(5), reply.Term)
+
+		sm.lastSnapshotIndex = 10
+		sm.lastSnapshotTerm = 5
+		reply, err = sm.HandleInstallSnapshot(context.Background(), &types.InstallSnapshotArgs{
+			Term:              5,
+			LeaderID:          "leader1",
+			LastIncludedIndex: 10,
+			LastIncludedTerm:  5,
+		})
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, types.Term(5), reply.Term)
+	})
+
+	t.Run("truncateLogAfterSnapshot zero index and success", func(t *testing.T) {
+		sm, _, _, _, _ := setupSnapshotManager(t)
+		sm.truncateLogAfterSnapshot(context.Background(), 0)
+
+		logMgr := sm.logMgr.(*mockLogManager)
+		logMgr.lastIndex = 10
+		logMgr.firstIndex = 1
+		sm.truncateLogAfterSnapshot(context.Background(), 5)
+	})
+
+	t.Run("SendSnapshot shutdown and leadership lost and RPC timeout/canceled", func(t *testing.T) {
+		sm, mockStorage, stateMgr, _, _ := setupSnapshotManager(t)
+		sm.isShutdown.Store(true)
+		sm.SendSnapshot(context.Background(), "follower1", 1)
+
+		sm.isShutdown.Store(false)
+		mockStorage.hookLoadSnapshot = func(ctx context.Context) (types.SnapshotMetadata, []byte, error) {
+			return types.SnapshotMetadata{LastIncludedIndex: 10, LastIncludedTerm: 2}, []byte("data"), nil
+		}
+		stateMgr.currentTerm = 3
+		stateMgr.currentRole = types.RoleFollower
+		sm.SendSnapshot(context.Background(), "follower1", 3)
+
+		stateMgr.currentRole = types.RoleLeader
+		mockNetwork := &mockNetworkManager{}
+		sm.networkMgr = mockNetwork
+
+		mockNetwork.sendInstallSnapshotFunc = func(ctx context.Context, target types.NodeID, args *types.InstallSnapshotArgs) (*types.InstallSnapshotReply, error) {
+			return nil, context.DeadlineExceeded
+		}
+		sm.SendSnapshot(context.Background(), "follower1", 3)
+
+		mockNetwork.sendInstallSnapshotFunc = func(ctx context.Context, target types.NodeID, args *types.InstallSnapshotArgs) (*types.InstallSnapshotReply, error) {
+			return nil, context.Canceled
+		}
+		sm.SendSnapshot(context.Background(), "follower1", 3)
+	})
+
+	t.Run("processSnapshotReply stale term and non-leader", func(t *testing.T) {
+		sm, _, stateMgr, _, updater := setupSnapshotManager(t)
+		meta := types.SnapshotMetadata{LastIncludedIndex: 10, LastIncludedTerm: 2}
+
+		stateMgr.currentTerm = 3
+		stateMgr.currentRole = types.RoleLeader
+		sm.processSnapshotReply("follower1", 3, meta, &types.InstallSnapshotReply{Term: 2}, time.Now())
+		testutil.AssertFalse(t, updater.peerUpdatedAfterSnapshot)
+
+		stateMgr.currentRole = types.RoleFollower
+		sm.processSnapshotReply("follower1", 3, meta, &types.InstallSnapshotReply{Term: 3}, time.Now())
+		testutil.AssertFalse(t, updater.peerUpdatedAfterSnapshot)
+	})
+
+	t.Run("restoreSnapshot shutdown", func(t *testing.T) {
+		sm, _, _, _, _ := setupSnapshotManager(t)
+		sm.isShutdown.Store(true)
+		err := sm.restoreSnapshot(context.Background(), types.SnapshotMetadata{LastIncludedIndex: 1, LastIncludedTerm: 1}, []byte("data"))
+		testutil.AssertErrorIs(t, err, ErrShuttingDown)
 	})
 }

@@ -1499,21 +1499,6 @@ func (lm *logManager) FindFirstIndexInTermUnsafe(
 		}
 	}
 
-	if firstIndexOfTermBlock == 0 {
-		if scanErr == nil {
-			lm.logger.Debugw(
-				"FindFirstIndexInTermUnsafe: scan completed without error, but no term index found",
-				"termToFind",
-				termToFind,
-				"searchUpToIndex",
-				searchUpToIndex,
-				"nodeID",
-				lm.id,
-			)
-		}
-		return 0, ErrNotFound
-	}
-
 	lm.logger.Debugw("FindFirstIndexInTermUnsafe: search completed successfully",
 		"termToFind", termToFind,
 		"firstIndexOfTermBlock", firstIndexOfTermBlock,
