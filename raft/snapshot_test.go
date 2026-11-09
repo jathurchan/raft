@@ -1394,3 +1394,18 @@ func TestRaftSnapshot_HandleInstall_IgnoresSnapshotAlreadyCommitted(t *testing.T
 	testutil.AssertFalse(t, applier.applierRestored, "an older snapshot must not roll back state")
 }
 
+func TestRaftSnapshot_HandleInstall_LearnsLeaderInSameTerm(t *testing.T) {
+	sm, _, stateMgr, _, _ := setupSnapshotManager(t)
+	stateMgr.currentTerm = 4
+	stateMgr.currentRole = types.RoleFollower
+	stateMgr.leaderID = "stale"
+
+	_, err := sm.HandleInstallSnapshot(context.Background(), &types.InstallSnapshotArgs{
+		Term: 4, LeaderID: "leader1", LastIncludedIndex: 15, LastIncludedTerm: 2, Data: []byte("state"),
+	})
+
+	testutil.AssertNoError(t, err)
+	_, _, leader := stateMgr.GetState()
+	testutil.AssertEqual(t, types.NodeID("leader1"), leader)
+}
+
