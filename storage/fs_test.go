@@ -568,3 +568,29 @@ func TestErrorCases(t *testing.T) {
 		testutil.AssertTrue(t, file == nil, "Expected file to be nil on error")
 	})
 }
+
+func TestDefaultFileSystem_Create(t *testing.T) {
+	fs := newFileSystem()
+	dir := t.TempDir()
+
+	t.Run("creates a missing file and replaces existing contents", func(t *testing.T) {
+		path := filepath.Join(dir, "created")
+		testutil.AssertNoError(t, os.WriteFile(path, []byte("old contents"), 0o644))
+
+		f, err := fs.Create(path)
+		testutil.AssertNoError(t, err)
+		_, err = f.Write([]byte("new"))
+		testutil.AssertNoError(t, err)
+		testutil.AssertNoError(t, f.Close())
+
+		got, err := os.ReadFile(path)
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, "new", string(got))
+	})
+
+	t.Run("returns an error when the directory is missing", func(t *testing.T) {
+		_, err := fs.Create(filepath.Join(dir, "missing", "file"))
+
+		testutil.AssertError(t, err)
+	})
+}

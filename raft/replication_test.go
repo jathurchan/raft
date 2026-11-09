@@ -1027,6 +1027,17 @@ func TestReplicationManager_RecordLeaseAck(t *testing.T) {
 		testutil.AssertEqual(t, now.Add(rm.leaseDuration), rm.leaseExpiry)
 	})
 
+	t.Run("does nothing when leases are disabled", func(t *testing.T) {
+		rm, now := setup(t, 2)
+
+		rm.mu.Lock()
+		defer rm.mu.Unlock()
+		rm.leaderLeaseEnabled = false
+		rm.recordLeaseAck("node2", now)
+
+		testutil.AssertLen(t, rm.leaseAcks, 0)
+	})
+
 	t.Run("lease never moves backwards", func(t *testing.T) {
 		rm, now := setup(t, 2)
 
@@ -2108,6 +2119,29 @@ func BenchmarkReplicationManager_Propose(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_, _, _, _ = rm.Propose(context.Background(), command)
 	}
+}
+
+func TestReplicationManager_ReplicateAppendedEntries_NoPeersChecksCommit(t *testing.T) {
+	rm, _, _, networkMgr, _, _ := setupTestReplicationManager(t)
+	defer rm.Stop()
+
+	metrics := &commitCheckCountingMetrics{Metrics: rm.metrics}
+	rm.metrics = metrics
+	rm.quorumSize = 1
+	networkMgr.setSendAppendEntriesFunc(
+		func(ctx context.Context, target types.NodeID, args *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+			t.Error("no replication should be sent without peers")
+			return nil, errors.New("unexpected")
+		},
+	)
+
+	rm.replicateAppendedEntries(1)
+
+	deadline := time.Now().Add(time.Second)
+	for metrics.triggered.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	testutil.AssertEqual(t, int32(1), metrics.triggered.Load())
 }
 
 func TestReplicationManager_ReplicationLoop(t *testing.T) {
