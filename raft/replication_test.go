@@ -824,6 +824,21 @@ func TestReplicationManager_Propose_GroupCommit(t *testing.T) {
 
 		testutil.AssertErrorIs(t, err, ErrTimeout)
 	})
+
+	t.Run("reports a failed append to the caller", func(t *testing.T) {
+		rm, logMgr, _, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		appendErr := errors.New("disk full")
+		logMgr.appendEntriesUnsafeFunc = func(ctx context.Context, entries []types.LogEntry) error {
+			return appendErr
+		}
+
+		index, _, isLeader, err := rm.Propose(context.Background(), []byte("cmd"))
+
+		testutil.AssertErrorIs(t, err, appendErr)
+		testutil.AssertEqual(t, types.Index(0), index)
+		testutil.AssertTrue(t, isLeader, "a failed append should not report lost leadership")
+	})
 }
 
 func TestReplicationManager_VerifyLeadership_ReturnsOnQuorum(t *testing.T) {

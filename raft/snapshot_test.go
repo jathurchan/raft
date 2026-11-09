@@ -1243,4 +1243,26 @@ func TestRaftSnapshot_HandleInstall_Chunks(t *testing.T) {
 
 		testutil.AssertEqual(t, "abcdef", string(applier.snapshotData))
 	})
+
+	t.Run("returns an error when the snapshot cannot be saved", func(t *testing.T) {
+		sm, mockStore, _, applier, _ := setupSnapshotManager(t)
+		saveErr := errors.New("disk full")
+		mockStore.setFailure("SaveSnapshot", saveErr)
+
+		_, err := sm.HandleInstallSnapshot(context.Background(), chunk("abcd", 0, false))
+
+		testutil.AssertErrorIs(t, err, saveErr)
+		testutil.AssertFalse(t, applier.applierRestored, "unsaved snapshot must not be restored")
+		testutil.AssertEqual(t, types.Index(0), sm.lastSnapshotIndex)
+	})
+
+	t.Run("returns an error when the state machine cannot restore", func(t *testing.T) {
+		sm, _, _, applier, _ := setupSnapshotManager(t)
+		applier.restoreErr = errors.New("restore failed")
+
+		_, err := sm.HandleInstallSnapshot(context.Background(), chunk("abcd", 0, false))
+
+		testutil.AssertErrorIs(t, err, applier.restoreErr)
+		testutil.AssertEqual(t, types.Index(0), sm.lastSnapshotIndex)
+	})
 }
