@@ -3,7 +3,7 @@ package raft
 import (
 	"context"
 
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/types"
 )
 
 // Applier defines how Raft applies committed log entries to an application's state machine
@@ -27,7 +27,7 @@ type Applier interface {
 	// should still be applied—skipping committed entries can cause divergence.
 	//
 	// Returns:
-	//   - resultData: the outcome of the command (e.g., LockInfo for "acquire")
+	//   - resultData: the application-defined outcome of the command
 	//   - err: non-nil only on unrecoverable failure. A nil error with non-nil
 	//     resultData indicates success. A non-nil error may accompany resultData
 	//     to provide partial context.

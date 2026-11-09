@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jathurchan/raftlock/logger"
+	"github.com/jathurchan/raft/logger"
 )
 
 // rwOperationLocker defines an interface for concurrency-safe execution

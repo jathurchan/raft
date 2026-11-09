@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jathurchan/raftlock/logger"
-	"github.com/jathurchan/raftlock/testutil"
+	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/testutil"
 )
 
 func TestRaftDependencies_Validate_Success(t *testing.T) {

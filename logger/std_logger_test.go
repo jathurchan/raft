@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/types"
 )
 
 // captureLogOutput captures log output for testing

@@ -33,7 +33,7 @@ jobs:
       - name: Run tests and generate coverage
         run: |
           go test -v -timeout=5m ./... -coverprofile=coverage.tmp.out -covermode=atomic
-          grep -vE '\.pb\.go:|/testutil/|/examples/' coverage.tmp.out > coverage.out
+          grep -vE '\.pb\.go:|/testutil/' coverage.tmp.out > coverage.out
       
       - name: Debug coverage file
         run: |

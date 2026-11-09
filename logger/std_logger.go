@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/types"
 )
 
 // LogLevel represents the severity of a log message.

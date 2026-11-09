@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jathurchan/raftlock/logger"
-	"github.com/jathurchan/raftlock/raft/proto"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/raft/proto"
+	"github.com/jathurchan/raft/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"

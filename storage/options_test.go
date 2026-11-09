@@ -3,7 +3,7 @@ package storage
 import (
 	"testing"
 
-	"github.com/jathurchan/raftlock/testutil"
+	"github.com/jathurchan/raft/testutil"
 )
 
 func TestDefaultFeatureFlags(t *testing.T) {

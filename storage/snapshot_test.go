@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jathurchan/raftlock/logger"
-	"github.com/jathurchan/raftlock/testutil"
-	"github.com/jathurchan/raftlock/types"
+	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/testutil"
+	"github.com/jathurchan/raft/types"
 )
 
 // TestSnapshotWriterSuccess tests the basic success path for the snapshot writer
