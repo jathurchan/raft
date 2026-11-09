@@ -19,22 +19,6 @@ const (
 	// Minimum number of entries beyond the last snapshot required to allow log compaction.
 	DefaultLogCompactionMinEntries = 5000
 
-	// Number of ticks the leader can wait before fsyncing persisted entries.
-	// A value of 0 or 1 means immediate sync.
-	DefaultStorageSyncDelayTicks = 5
-
-	// Ticks between checks for applying committed entries to the state machine.
-	DefaultApplyTickCount = 1
-
-	// Enables the ReadIndex optimization for linearizable reads.
-	DefaultEnableReadIndex = true
-
-	// Enables leader lease for low-latency local reads under stable leadership.
-	DefaultEnableLeaderLease = true
-
-	// Enables PreVote phase to reduce unnecessary elections due to network partitions.
-	DefaultPreVoteEnabled = true
-
 	// Maximum number of log entries applied to the state machine in one batch.
 	DefaultMaxApplyBatchSize = 10
 

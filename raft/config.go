@@ -56,14 +56,15 @@ type Options struct {
 	// SnapshotThreshold controls when to trigger snapshotting based on the log size.
 	SnapshotThreshold int
 
-	// StorageSyncDelay is the number of ticks a leader may wait before forcing a storage sync.
-	// Higher values improve throughput but increase data loss risk on crash.
+	// Deprecated: StorageSyncDelay has no effect. Durability is controlled by the storage
+	// layer, for example FileStorageOptions.SyncOnAppend.
 	StorageSyncDelay int
 
 	// LogCompactionMinEntries is the minimum number of entries needed beyond a snapshot index to allow compaction.
 	LogCompactionMinEntries int
 
-	// ApplyTickCount controls how frequently committed entries are applied to the state machine.
+	// Deprecated: ApplyTickCount has no effect. Committed entries are applied as soon as
+	// they commit.
 	ApplyTickCount int
 
 	// ApplyEntryTimeout sets a maximum duration for applying a single entry to the state machine.
@@ -74,16 +75,13 @@ type Options struct {
 }
 
 // FeatureFlags enables optional Raft features and optimizations.
+// Flags are used exactly as set, so a flag left unset is off.
 type FeatureFlags struct {
-	// EnableReadIndex enables the ReadIndex protocol for faster linearizable reads.
+	// Deprecated: EnableReadIndex has no effect. ReadIndex is always available.
 	EnableReadIndex bool
 
 	// EnableLeaderLease enables leader leases for low-latency reads.
-	// Requires EnableReadIndex to be true.
 	EnableLeaderLease bool
-
-	// explicitlySet is an internal flag to track if defaults should be overridden.
-	explicitlySet bool
 }
 
 // TuningParams configures advanced performance-related parameters.
@@ -96,8 +94,7 @@ type TuningParams struct {
 	MaxSnapshotChunkSize int
 }
 
-// WithExplicitFlags marks feature flags as explicitly set by the user
+// Deprecated: WithExplicitFlags returns f unchanged. Flags are always used as set.
 func (f FeatureFlags) WithExplicitFlags() FeatureFlags {
-	f.explicitlySet = true
 	return f
 }
