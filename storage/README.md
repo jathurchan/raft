@@ -136,6 +136,9 @@ type Storage interface {
     TruncateLogPrefix(ctx context.Context, index types.Index) error
     TruncateLogSuffix(ctx context.Context, index types.Index) error
 
+    // Discard the whole log and replace it with one entry, after installing a snapshot.
+    ResetLog(ctx context.Context, entry types.LogEntry) error
+
     // Save and load snapshots.
     SaveSnapshot(ctx context.Context, meta types.SnapshotMetadata, data []byte) error
     LoadSnapshot(ctx context.Context) (types.SnapshotMetadata, []byte, error)

@@ -97,6 +97,12 @@ If you prefer to build and test directly from the source code:
     go test -v -timeout=5m -tags=integration ./raft -run=TestRaftIntegration
     ```
 
+6. **Run the end-to-end failure tests on a 5-node `kind` cluster** (needs Docker and `kubectl`, see [`e2e/README.md`](e2e/README.md)):
+
+    ```bash
+    ./e2e/run.sh
+    ```
+
 ## Where users can get help with your project
 
 If you have any questions or encounter any issues while using `raft`, please feel free to open an issue on the [**GitHub repository**](https://github.com/jathurchan/raft/issues). We will do our best to help you as soon as possible.
