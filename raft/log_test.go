@@ -1698,3 +1698,155 @@ func TestRaftLog_LogManager_StateConsistency(t *testing.T) {
 		}
 	}
 }
+
+func TestRaftLog_AdditionalCoverage(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("GetTermInternal_ConcurrentCompactionOnErrEntryNotFound", func(t *testing.T) {
+		lm, store, _ := setupLogManager(t)
+		entries := prepareTestEntries(1, 5, 1)
+		if err := lm.AppendEntries(ctx, entries); err != nil {
+			t.Fatalf("AppendEntries failed: %v", err)
+		}
+
+		store.hookGetLogEntry = func(index types.Index) {
+			store.mu.Lock()
+			store.firstLogIndex = 4
+			store.mu.Unlock()
+		}
+		defer func() { store.hookGetLogEntry = nil }()
+
+		_, err := lm.GetTermUnsafe(ctx, 2)
+		if !errors.Is(err, ErrCompacted) {
+			t.Fatalf("Expected ErrCompacted, got %v", err)
+		}
+	})
+
+	t.Run("GetEntriesUnsafe_Error", func(t *testing.T) {
+		lm, store, _ := setupLogManager(t)
+		entries := prepareTestEntries(1, 3, 1)
+		if err := lm.AppendEntries(ctx, entries); err != nil {
+			t.Fatalf("AppendEntries failed: %v", err)
+		}
+
+		store.setFailure("GetLogEntries", errors.New("storage failure"))
+		defer store.clearFailures()
+
+		if _, err := lm.GetEntriesUnsafe(ctx, 1, 3); err == nil {
+			t.Fatal("Expected error from GetEntriesUnsafe")
+		}
+	})
+
+	t.Run("ValidateEntryRange_EmptyExpected", func(t *testing.T) {
+		if err := validateEntryRange(nil, 3, 3); err != nil {
+			t.Fatalf("Expected nil error for empty range [3, 3), got %v", err)
+		}
+	})
+
+	t.Run("TruncatePrefix_DecreasedFirstIndex", func(t *testing.T) {
+		lm, store, _ := setupLogManager(t)
+		entries := prepareTestEntries(1, 5, 1)
+		if err := lm.AppendEntries(ctx, entries); err != nil {
+			t.Fatalf("AppendEntries failed: %v", err)
+		}
+
+		calls := 0
+		store.hookFirstLogIndex = func() types.Index {
+			calls++
+			if calls == 1 {
+				return 3
+			}
+			return 1
+		}
+		defer func() { store.hookFirstLogIndex = nil }()
+
+		if err := lm.TruncatePrefix(ctx, 4); err != nil {
+			t.Fatalf("TruncatePrefix failed: %v", err)
+		}
+	})
+
+	t.Run("FindLastEntryWithTermUnsafe_WithHintAndContextCancelAndCompacted", func(t *testing.T) {
+		lm, store, _ := setupLogManager(t)
+		entries := prepareTestEntries(1, 5, 2)
+		if err := lm.AppendEntries(ctx, entries); err != nil {
+			t.Fatalf("AppendEntries failed: %v", err)
+		}
+
+		idx, err := lm.FindLastEntryWithTermUnsafe(ctx, 2, 3)
+		if err != nil || idx != 3 {
+			t.Fatalf("Expected index 3, got %d, err %v", idx, err)
+		}
+
+		cancelCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, err := lm.FindLastEntryWithTermUnsafe(cancelCtx, 2, 0); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Expected context.Canceled, got %v", err)
+		}
+
+		// Simulate concurrent compaction during scan
+		store.hookGetLogEntry = func(index types.Index) {
+			store.mu.Lock()
+			store.firstLogIndex = 5
+			store.mu.Unlock()
+		}
+		defer func() { store.hookGetLogEntry = nil }()
+
+		// Search for term 1 (cached lastTerm is 2 at index 5, so index 4 calls GetLogEntry which compacts)
+		if _, err := lm.FindLastEntryWithTermUnsafe(ctx, 1, 0); !errors.Is(err, ErrCompacted) {
+			t.Fatalf("Expected ErrCompacted, got %v", err)
+		}
+	})
+
+	t.Run("FetchEntryTerm_AllErrorBranches", func(t *testing.T) {
+		lm, store, _ := setupLogManager(t)
+
+		for _, tc := range []error{
+			context.DeadlineExceeded,
+			context.Canceled,
+			storage.ErrEntryNotFound,
+		} {
+			store.setFailure("GetLogEntry", tc)
+			if _, err := lm.fetchEntryTerm(ctx, 1); !errors.Is(err, tc) {
+				t.Fatalf("Expected error %v, got %v", tc, err)
+			}
+		}
+		store.clearFailures()
+	})
+
+	t.Run("RestoreFromSnapshot_AllBranches", func(t *testing.T) {
+		lm, store, _ := setupLogManager(t)
+		entries := prepareTestEntries(1, 5, 1)
+		if err := lm.AppendEntries(ctx, entries); err != nil {
+			t.Fatalf("AppendEntries failed: %v", err)
+		}
+
+		// Invalid index 0
+		if err := lm.RestoreFromSnapshot(ctx, types.SnapshotMetadata{LastIncludedIndex: 0, LastIncludedTerm: 1}); err == nil {
+			t.Fatal("Expected error for LastIncludedIndex == 0")
+		}
+
+		// Invalid term 0
+		if err := lm.RestoreFromSnapshot(ctx, types.SnapshotMetadata{LastIncludedIndex: 3, LastIncludedTerm: 0}); err == nil {
+			t.Fatal("Expected error for LastIncludedTerm == 0")
+		}
+
+		// Inconsistent log state: currentLastIndex (5) > LastIncludedIndex (2), but currentFirstIndex (1) != 3
+		if err := lm.RestoreFromSnapshot(ctx, types.SnapshotMetadata{LastIncludedIndex: 2, LastIncludedTerm: 1}); err == nil {
+			t.Fatal("Expected error for inconsistent log state after snapshot")
+		}
+
+		// Consistent log state: truncate prefix to 3 first, then restore at index 2
+		if err := store.TruncateLogPrefix(ctx, 3); err != nil {
+			t.Fatalf("TruncateLogPrefix failed: %v", err)
+		}
+		if err := lm.RestoreFromSnapshot(ctx, types.SnapshotMetadata{LastIncludedIndex: 2, LastIncludedTerm: 1}); err != nil {
+			t.Fatalf("Expected successful RestoreFromSnapshot, got %v", err)
+		}
+
+		// Shutdown check
+		lm.isShutdown.Store(true)
+		if err := lm.RestoreFromSnapshot(ctx, types.SnapshotMetadata{LastIncludedIndex: 2, LastIncludedTerm: 1}); !errors.Is(err, ErrShuttingDown) {
+			t.Fatalf("Expected ErrShuttingDown, got %v", err)
+		}
+	})
+}

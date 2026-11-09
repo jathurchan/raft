@@ -12,6 +12,8 @@ import (
 // LogLevel represents the severity of a log message.
 type LogLevel int
 
+var osExit = os.Exit
+
 const (
 	LevelDebug LogLevel = iota
 	LevelInfo
@@ -82,7 +84,7 @@ func (l *StdLogger) log(level LogLevel, levelStr string, msg string, kvs ...any)
 	log.Println(b.String())
 
 	if level == LevelFatal {
-		os.Exit(1)
+		osExit(1)
 	}
 }
 

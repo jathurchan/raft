@@ -264,34 +264,38 @@ func NewNoOpMetrics() Metrics {
 	return &noOpMetrics{}
 }
 
-func (m *noOpMetrics) IncCounter(name string, labels ...string)                      {}
-func (m *noOpMetrics) AddCounter(name string, value float64, labels ...string)       {}
-func (m *noOpMetrics) SetGauge(name string, value float64, labels ...string)         {}
-func (m *noOpMetrics) ObserveHistogram(name string, value float64, labels ...string) {}
-func (m *noOpMetrics) ObserveCommitIndex(index types.Index)                          {}
-func (m *noOpMetrics) ObserveAppliedIndex(index types.Index)                         {}
-func (m *noOpMetrics) ObserveTerm(term types.Term)                                   {}
-func (m *noOpMetrics) ObserveLeaderChange(newLeader types.NodeID, term types.Term)   {}
-func (m *noOpMetrics) ObserveLeaderNotificationDropped()                             {}
-func (m *noOpMetrics) ObserveLeadershipLost(term types.Term, reason string)          {}
-func (m *noOpMetrics) ObserveApplyNotificationDropped()                              {}
-func (m *noOpMetrics) ObserveApplyLoopStopped(reason string)                         {}
+func (m *noOpMetrics) IncCounter(name string, labels ...string)                      { _ = m }
+func (m *noOpMetrics) AddCounter(name string, value float64, labels ...string)       { _ = m }
+func (m *noOpMetrics) SetGauge(name string, value float64, labels ...string)         { _ = m }
+func (m *noOpMetrics) ObserveHistogram(name string, value float64, labels ...string) { _ = m }
+func (m *noOpMetrics) ObserveCommitIndex(index types.Index)                          { _ = m }
+func (m *noOpMetrics) ObserveAppliedIndex(index types.Index)                         { _ = m }
+func (m *noOpMetrics) ObserveTerm(term types.Term)                                   { _ = m }
+func (m *noOpMetrics) ObserveLeaderChange(newLeader types.NodeID, term types.Term)   { _ = m }
+func (m *noOpMetrics) ObserveLeaderNotificationDropped()                             { _ = m }
+func (m *noOpMetrics) ObserveLeadershipLost(term types.Term, reason string)          { _ = m }
+func (m *noOpMetrics) ObserveApplyNotificationDropped()                              { _ = m }
+func (m *noOpMetrics) ObserveApplyLoopStopped(reason string)                         { _ = m }
 
 func (m *noOpMetrics) ObserveRoleChange(
 	newRole types.NodeRole,
 	oldRole types.NodeRole,
 	term types.Term,
 ) {
+	_ = m
 }
-func (m *noOpMetrics) ObserveElectionStart(term types.Term, reason ElectionReason) {}
-func (m *noOpMetrics) ObserveVoteGranted(term types.Term)                          {}
+func (m *noOpMetrics) ObserveElectionStart(term types.Term, reason ElectionReason) { _ = m }
+func (m *noOpMetrics) ObserveVoteGranted(term types.Term)                          { _ = m }
 func (m *noOpMetrics) ObserveLogState(firstIndex, lastIndex types.Index, lastTerm types.Term) {
+	_ = m
 }
 
 func (m *noOpMetrics) ObserveLogAppend(entryCount int, latency time.Duration, success bool) {
+	_ = m
 }
 
 func (m *noOpMetrics) ObserveLogRead(readType LogReadType, latency time.Duration, success bool) {
+	_ = m
 }
 
 func (m *noOpMetrics) ObserveLogTruncate(
@@ -300,20 +304,23 @@ func (m *noOpMetrics) ObserveLogTruncate(
 	latency time.Duration,
 	success bool,
 ) {
+	_ = m
 }
-func (m *noOpMetrics) ObserveLogConsistencyError()                                            {}
-func (m *noOpMetrics) ObserveElectionElapsed(nodeID types.NodeID, term types.Term, ticks int) {}
-func (m *noOpMetrics) ObserveProposal(success bool, reason ProposalResult)                    {}
-func (m *noOpMetrics) ObserveReadIndex(success bool, path string)                             {}
+func (m *noOpMetrics) ObserveLogConsistencyError()                                            { _ = m }
+func (m *noOpMetrics) ObserveElectionElapsed(nodeID types.NodeID, term types.Term, ticks int) { _ = m }
+func (m *noOpMetrics) ObserveProposal(success bool, reason ProposalResult)                    { _ = m }
+func (m *noOpMetrics) ObserveReadIndex(success bool, path string)                             { _ = m }
 
 func (m *noOpMetrics) ObserveSnapshot(
 	action SnapshotAction,
 	status SnapshotStatus,
 	labels ...string,
 ) {
+	_ = m
 }
 
 func (m *noOpMetrics) ObserveSnapshotRecovery(status SnapshotStatus, reason SnapshotReason) {
+	_ = m
 }
 
 func (m *noOpMetrics) ObservePeerReplication(
@@ -321,16 +328,18 @@ func (m *noOpMetrics) ObservePeerReplication(
 	success bool,
 	reason ReplicationResult,
 ) {
+	_ = m
 }
-func (m *noOpMetrics) ObserveHeartbeat(peerID types.NodeID, success bool, latency time.Duration) {}
-func (m *noOpMetrics) ObserveHeartbeatSent()                                                     {}
-func (m *noOpMetrics) ObserveAppendEntriesHeartbeat()                                            {}
-func (m *noOpMetrics) ObserveAppendEntriesReplication()                                          {}
-func (m *noOpMetrics) ObserveAppendEntriesRejected(reason string)                                {}
-func (m *noOpMetrics) ObserveEntriesReceived(count int)                                          {}
-func (m *noOpMetrics) ObserveCommandBytesReceived(bytes int)                                     {}
-
-func (m *noOpMetrics) ObserveTick(role types.NodeRole)              {}
-func (m *noOpMetrics) ObserveComponentStopTimeout(component string) {}
-func (m *noOpMetrics) ObserveCommitCheckTriggered()                 {}
-func (m *noOpMetrics) ObserveCommitCheckPending()                   {}
+func (m *noOpMetrics) ObserveHeartbeat(peerID types.NodeID, success bool, latency time.Duration) {
+	_ = m
+}
+func (m *noOpMetrics) ObserveHeartbeatSent()                        { _ = m }
+func (m *noOpMetrics) ObserveAppendEntriesHeartbeat()               { _ = m }
+func (m *noOpMetrics) ObserveAppendEntriesReplication()             { _ = m }
+func (m *noOpMetrics) ObserveAppendEntriesRejected(reason string)   { _ = m }
+func (m *noOpMetrics) ObserveEntriesReceived(count int)             { _ = m }
+func (m *noOpMetrics) ObserveCommandBytesReceived(bytes int)        { _ = m }
+func (m *noOpMetrics) ObserveTick(role types.NodeRole)              { _ = m }
+func (m *noOpMetrics) ObserveComponentStopTimeout(component string) { _ = m }
+func (m *noOpMetrics) ObserveCommitCheckTriggered()                 { _ = m }
+func (m *noOpMetrics) ObserveCommitCheckPending()                   { _ = m }
