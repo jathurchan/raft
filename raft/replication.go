@@ -419,7 +419,7 @@ func (rm *replicationManager) flushProposals() {
 
 	entries, term, isLeader, err := rm.appendProposalBatch(batch)
 	if err == nil {
-		go rm.replicateToAllPeers(term, false)
+		rm.replicateAppendedEntries(term)
 	}
 
 	for i, p := range batch {
@@ -517,6 +517,17 @@ func (rm *replicationManager) AppendLeaderNoOp() {
 			"error", err,
 			"index", entry.Index,
 			"term", term)
+		return
+	}
+
+	rm.replicateAppendedEntries(term)
+}
+
+// replicateAppendedEntries sends new entries to peers. With no peers there are no
+// replies to trigger a commit check, so it is triggered directly.
+func (rm *replicationManager) replicateAppendedEntries(term types.Term) {
+	if rm.quorumSize == 1 {
+		go rm.triggerCommitCheck()
 		return
 	}
 
