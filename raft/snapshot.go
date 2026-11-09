@@ -1189,8 +1189,9 @@ func (sm *snapshotManager) processSnapshotReply(
 			"currentLocalTerm",
 			currentLocalTerm,
 		)
-		sm.stateMgr.BecomeFollower(context.Background(), reply.Term, peer)
 		sm.mu.Unlock()
+		// BecomeFollower takes the shared mutex, so it must run after the release.
+		sm.stateMgr.BecomeFollower(context.Background(), reply.Term, unknownNodeID)
 		sm.metrics.ObserveSnapshot(SnapshotActionSend, SnapshotStatusFailure,
 			"peer", string(peer), "reason", "higher_term_reply")
 		return

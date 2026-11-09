@@ -1409,3 +1409,24 @@ func TestRaftSnapshot_HandleInstall_LearnsLeaderInSameTerm(t *testing.T) {
 	testutil.AssertEqual(t, types.NodeID("leader1"), leader)
 }
 
+func TestProcessSnapshotReply_HigherTermDoesNotHoldSharedMutex(t *testing.T) {
+	sm, _, stateMgr, _, _ := setupSnapshotManager(t)
+
+	steppedDown := false
+	stateMgr.becomeFollowerFunc = func(ctx context.Context, term types.Term, leaderID types.NodeID) {
+		// The real BecomeFollower takes the shared mutex.
+		steppedDown = true
+		testutil.AssertTrue(t, sm.mu.TryLock(), "shared mutex must not be held")
+		sm.mu.Unlock()
+	}
+
+	sm.processSnapshotReply(
+		"follower1",
+		3,
+		types.SnapshotMetadata{LastIncludedIndex: 10, LastIncludedTerm: 2},
+		&types.InstallSnapshotReply{Term: 5},
+		sm.clock.Now(),
+	)
+
+	testutil.AssertTrue(t, steppedDown, "node should step down on a higher term")
+}
