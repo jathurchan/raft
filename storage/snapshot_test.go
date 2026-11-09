@@ -1152,3 +1152,20 @@ func TestFileStorage_ResetLog_ReportsFailures(t *testing.T) {
 	})
 }
 
+func TestFileStorage_CompactionRetainsRecentEntries(t *testing.T) {
+	ctx := context.Background()
+	opts := DefaultFileStorageOptions()
+	opts.Features.EnableAsyncTruncation = false
+	opts.RetainedLogSize = 3
+	st, err := NewFileStorageWithOptions(StorageConfig{Dir: t.TempDir()}, opts, logger.NewNoOpLogger())
+	testutil.AssertNoError(t, err)
+	testutil.AssertNoError(t, st.AppendLogEntries(ctx, diskEntries(1, 10)))
+
+	small := types.SnapshotMetadata{LastIncludedIndex: 3, LastIncludedTerm: 3}
+	testutil.AssertNoError(t, st.SaveSnapshot(ctx, small, []byte("state")))
+	testutil.AssertEqual(t, types.Index(1), st.FirstLogIndex())
+
+	meta := types.SnapshotMetadata{LastIncludedIndex: 8, LastIncludedTerm: 3}
+	testutil.AssertNoError(t, st.SaveSnapshot(ctx, meta, []byte("state")))
+	testutil.AssertEqual(t, types.Index(5), st.FirstLogIndex())
+}
