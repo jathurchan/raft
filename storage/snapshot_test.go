@@ -1009,3 +1009,22 @@ func TestSnapshotEndToEnd(t *testing.T) {
 		})
 	}
 }
+
+func TestFileStorage_SnapshotRoundTripOnDisk(t *testing.T) {
+	st, err := NewFileStorage(StorageConfig{Dir: t.TempDir()}, logger.NewNoOpLogger())
+	testutil.AssertNoError(t, err)
+
+	for name, size := range map[string]int{"small": 16, "larger than a chunk": 3 * defaultChunkSizeBytes} {
+		t.Run(name, func(t *testing.T) {
+			meta := types.SnapshotMetadata{LastIncludedIndex: types.Index(size), LastIncludedTerm: 2}
+			want := bytes.Repeat([]byte{7}, size)
+
+			testutil.AssertNoError(t, st.SaveSnapshot(context.Background(), meta, want))
+
+			gotMeta, got, err := st.LoadSnapshot(context.Background())
+			testutil.AssertNoError(t, err)
+			testutil.AssertEqual(t, meta, gotMeta)
+			testutil.AssertTrue(t, bytes.Equal(want, got), "snapshot data should round-trip")
+		})
+	}
+}
