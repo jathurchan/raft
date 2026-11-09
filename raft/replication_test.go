@@ -1615,8 +1615,8 @@ func TestReplicationManager_UpdatePeerAfterSnapshotSend(t *testing.T) {
 
 		// MatchIndex should not regress
 		testutil.AssertEqual(t, types.Index(18), updatedState.MatchIndex)
-		// But NextIndex should be updated to snapshot + 1
-		testutil.AssertEqual(t, snapshotIndex+1, updatedState.NextIndex)
+		// NextIndex must stay ahead of MatchIndex
+		testutil.AssertEqual(t, types.Index(19), updatedState.NextIndex)
 	})
 
 	t.Run("SkipsWhenPeerNotFound", func(t *testing.T) {
@@ -2145,6 +2145,56 @@ func TestReplicationManager_ReplicateAppendedEntries_NoPeersChecksCommit(t *test
 }
 
 func TestReplicationManager_SnapshotBoundary(t *testing.T) {
+	t.Run("starts one snapshot at a time per peer", func(t *testing.T) {
+		rm, _, _, _, snapshotMgr, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+
+		sent := make(chan struct{}, 2)
+		snapshotMgr.sendSnapshotFunc = func(context.Context, types.NodeID, types.Term) { sent <- struct{}{} }
+
+		rm.initiateSnapshotIfNeeded("node2", 1, 1, 5)
+		rm.initiateSnapshotIfNeeded("node2", 1, 1, 5)
+		rm.initiateSnapshotIfNeeded("missing", 1, 1, 5)
+
+		<-sent
+		select {
+		case <-sent:
+			t.Fatal("a second snapshot was started for the same peer")
+		case <-time.After(50 * time.Millisecond):
+		}
+	})
+
+	t.Run("a stale snapshot reply does not move a peer backwards", func(t *testing.T) {
+		rm, _, _, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		rm.mu.Lock()
+		rm.peerStates["node2"].MatchIndex = 50
+		rm.peerStates["node2"].NextIndex = 51
+		rm.mu.Unlock()
+
+		rm.UpdatePeerAfterSnapshotSend("node2", 10)
+
+		rm.mu.RLock()
+		defer rm.mu.RUnlock()
+		testutil.AssertEqual(t, types.Index(51), rm.peerStates["node2"].NextIndex)
+	})
+
+	t.Run("a successful append advances a peer behind its match index", func(t *testing.T) {
+		rm, _, _, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		rm.mu.Lock()
+		rm.peerStates["node2"].MatchIndex = 50
+		rm.peerStates["node2"].NextIndex = 11
+		rm.mu.Unlock()
+
+		args := &types.AppendEntriesArgs{Entries: []types.LogEntry{{Index: 11}, {Index: 12}}}
+		rm.handleAppendReply("node2", 1, args, &types.AppendEntriesReply{Term: 1, Success: true}, false, time.Millisecond)
+
+		rm.mu.RLock()
+		defer rm.mu.RUnlock()
+		testutil.AssertEqual(t, types.Index(13), rm.peerStates["node2"].NextIndex)
+	})
+
 	t.Run("sends a snapshot to a peer that needs the boundary entry", func(t *testing.T) {
 		rm, logMgr, _, networkMgr, snapshotMgr, _ := setupTestReplicationManager(t)
 		defer rm.Stop()
