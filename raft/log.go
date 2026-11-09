@@ -164,6 +164,11 @@ type LogManager interface {
 	// This method is safe for concurrent use and provides a consistent snapshot of the log state.
 	GetLogStateForDebugging() LogDebugState
 
+	// InstallSnapshotBoundary makes the log start at the snapshot's last included entry.
+	// A log that already holds that entry keeps it and everything after it. Any other
+	// log is discarded and replaced by a single boundary entry.
+	InstallSnapshotBoundary(ctx context.Context, meta types.SnapshotMetadata) error
+
 	// RestoreFromSnapshot updates the log manager's state after a snapshot has been installed.
 	// This should be called by the snapshot manager after successfully installing a snapshot
 	// and truncating the log. It updates cached state and ensures consistency.
@@ -1740,6 +1745,38 @@ func (lm *logManager) GetLogStateForDebugging() LogDebugState {
 		"nodeID", lm.id)
 
 	return state
+}
+
+// InstallSnapshotBoundary makes the log start at the snapshot's last included entry.
+func (lm *logManager) InstallSnapshotBoundary(
+	ctx context.Context,
+	meta types.SnapshotMetadata,
+) error {
+	if lm.isShutdown.Load() {
+		return ErrShuttingDown
+	}
+
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	term, err := lm.getTermInternal(ctx, meta.LastIncludedIndex, true)
+	if err == nil && term == meta.LastIncludedTerm {
+		return lm.truncatePrefixInternal(ctx, meta.LastIncludedIndex)
+	}
+	if errors.Is(err, ErrCompacted) {
+		return nil // The log has already moved past this snapshot.
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("failed to read snapshot boundary: %w", err)
+	}
+
+	boundary := types.LogEntry{Index: meta.LastIncludedIndex, Term: meta.LastIncludedTerm}
+	if err := lm.storage.ResetLog(ctx, boundary); err != nil {
+		return fmt.Errorf("failed to reset log to snapshot boundary: %w", err)
+	}
+	lm.updateCachedStateLocked(meta.LastIncludedIndex, meta.LastIncludedTerm)
+
+	return nil
 }
 
 // RestoreFromSnapshot updates the log manager's state after a snapshot has been installed.

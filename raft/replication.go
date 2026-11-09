@@ -954,7 +954,7 @@ func (rm *replicationManager) checkLogConsistencyLocked(
 
 		// If we can't read the term, assume inconsistency and provide fallback
 		if errors.Is(err, ErrCompacted) {
-			return false, 1, 0 // Start from beginning if compacted
+			return false, rm.logMgr.GetFirstIndexUnsafe() + 1, 0 // Resume after the snapshot
 		}
 		return false, prevLogIndex, 0
 	}
@@ -1216,16 +1216,17 @@ func (rm *replicationManager) replicateToPeerInternal(
 
 	// Check if we need to send a snapshot
 	firstLogIndex := rm.logMgr.GetFirstIndex()
-	if nextIndex < firstLogIndex {
-		if snapshotInProgress {
-			rm.logger.Debugw("Snapshot already in progress for peer",
-				"peerID", peerID,
-				"nextIndex", nextIndex,
-				"firstLogIndex", firstLogIndex)
+	// The first entry of a compacted log is only a boundary, and cannot be sent.
+	if firstLogIndex > 1 && nextIndex <= firstLogIndex {
+		if !isHeartbeat {
+			if !snapshotInProgress {
+				rm.initiateSnapshotIfNeeded(peerID, nextIndex, term, firstLogIndex)
+			}
 			return
 		}
-		rm.initiateSnapshotIfNeeded(peerID, nextIndex, term, firstLogIndex)
-		return
+		// A heartbeat must still reach this peer, to carry the term and keep it from
+		// starting elections while it waits for a snapshot.
+		nextIndex = firstLogIndex + 1
 	}
 
 	lastLogIndex := rm.logMgr.GetLastIndexUnsafe()

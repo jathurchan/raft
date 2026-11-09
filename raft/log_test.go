@@ -11,6 +11,7 @@ import (
 
 	"github.com/jathurchan/raft/logger"
 	"github.com/jathurchan/raft/storage"
+	"github.com/jathurchan/raft/testutil"
 	"github.com/jathurchan/raft/types"
 )
 
@@ -1848,5 +1849,81 @@ func TestRaftLog_AdditionalCoverage(t *testing.T) {
 		if err := lm.RestoreFromSnapshot(ctx, types.SnapshotMetadata{LastIncludedIndex: 2, LastIncludedTerm: 1}); !errors.Is(err, ErrShuttingDown) {
 			t.Fatalf("Expected ErrShuttingDown, got %v", err)
 		}
+	})
+}
+
+func TestLogManager_InstallSnapshotBoundary(t *testing.T) {
+	meta := types.SnapshotMetadata{LastIncludedIndex: 5, LastIncludedTerm: 2}
+
+	setup := func(t *testing.T, entries ...types.LogEntry) (LogManager, *mockStorage) {
+		lm, storage, _ := setupLogManager(t)
+		if len(entries) > 0 {
+			storage.log = entries
+			storage.firstLogIndex = entries[0].Index
+			testutil.AssertNoError(t, lm.Initialize(context.Background()))
+		}
+		return lm, storage
+	}
+
+	entry := func(index types.Index, term types.Term) types.LogEntry {
+		return types.LogEntry{Index: index, Term: term, Command: []byte("cmd")}
+	}
+
+	t.Run("keeps the boundary and later entries when the term matches", func(t *testing.T) {
+		lm, storage := setup(t, entry(4, 2), entry(5, 2), entry(6, 2))
+
+		testutil.AssertNoError(t, lm.InstallSnapshotBoundary(context.Background(), meta))
+
+		testutil.AssertEqual(t, types.Index(5), storage.FirstLogIndex())
+		testutil.AssertEqual(t, types.Index(6), storage.LastLogIndex())
+	})
+
+	t.Run("replaces a log that stops before the snapshot", func(t *testing.T) {
+		lm, storage := setup(t, entry(1, 1), entry(2, 1))
+
+		testutil.AssertNoError(t, lm.InstallSnapshotBoundary(context.Background(), meta))
+
+		testutil.AssertEqual(t, []types.LogEntry{{Index: 5, Term: 2}}, storage.log)
+		testutil.AssertEqual(t, types.Index(5), lm.GetLastIndexUnsafe())
+		testutil.AssertEqual(t, types.Term(2), lm.GetLastTermUnsafe())
+	})
+
+	t.Run("replaces a log whose entry at the snapshot index conflicts", func(t *testing.T) {
+		lm, storage := setup(t, entry(5, 1), entry(6, 1))
+
+		testutil.AssertNoError(t, lm.InstallSnapshotBoundary(context.Background(), meta))
+
+		testutil.AssertEqual(t, []types.LogEntry{{Index: 5, Term: 2}}, storage.log)
+	})
+
+	t.Run("leaves a log that has moved past the snapshot", func(t *testing.T) {
+		lm, storage := setup(t, entry(8, 2), entry(9, 2))
+
+		testutil.AssertNoError(t, lm.InstallSnapshotBoundary(context.Background(), meta))
+
+		testutil.AssertLen(t, storage.log, 2)
+	})
+
+	t.Run("leaves the log alone on a read failure", func(t *testing.T) {
+		lm, storage := setup(t, entry(4, 2), entry(5, 1), entry(6, 2))
+		storage.setFailure("GetLogEntry", errors.New("disk failure"))
+
+		testutil.AssertError(t, lm.InstallSnapshotBoundary(context.Background(), meta))
+
+		testutil.AssertLen(t, storage.log, 3)
+	})
+
+	t.Run("reports a reset failure", func(t *testing.T) {
+		lm, storage := setup(t, entry(1, 1))
+		storage.setFailure("ResetLog", errors.New("disk failure"))
+
+		testutil.AssertError(t, lm.InstallSnapshotBoundary(context.Background(), meta))
+	})
+
+	t.Run("refuses during shutdown", func(t *testing.T) {
+		lm, _ := setup(t)
+		lm.(*logManager).isShutdown.Store(true)
+
+		testutil.AssertErrorIs(t, lm.InstallSnapshotBoundary(context.Background(), meta), ErrShuttingDown)
 	})
 }
