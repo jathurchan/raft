@@ -822,7 +822,7 @@ func (rm *replicationManager) HandleAppendEntries(
 	}
 
 	// Get current state after potential step down
-	currentTerm, currentRole, _ := rm.stateMgr.GetState()
+	currentTerm, currentRole, currentLeader := rm.stateMgr.GetState()
 	reply := &types.AppendEntriesReply{Term: currentTerm, Success: false}
 
 	// Reject if term is stale
@@ -835,7 +835,8 @@ func (rm *replicationManager) HandleAppendEntries(
 	}
 
 	// Ensure we're a follower for current term
-	if currentRole != types.RoleFollower && args.Term == currentTerm {
+	if args.Term == currentTerm &&
+		(currentRole != types.RoleFollower || currentLeader != args.LeaderID) {
 		rm.logger.Infow("Received AppendEntries for current term while not follower; transitioning",
 			"term", currentTerm,
 			"previousRole", currentRole,

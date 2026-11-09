@@ -1101,10 +1101,11 @@ func (em *electionManager) HandleRequestVote(
 		"term", args.Term,
 		"nodeID", em.id)
 
+	// A candidate is not a leader, so the leader becomes unknown.
 	steppedDown, termBeforeCheck := em.stateMgr.CheckTermAndStepDown(
 		ctx,
 		args.Term,
-		args.CandidateID,
+		unknownNodeID,
 	)
 	if steppedDown {
 		em.logger.Infow("Stepped down due to higher term in vote request",
