@@ -1440,8 +1440,11 @@ func (m *mockLogManager) GetTerm(ctx context.Context, index types.Index) (types.
 }
 
 func (m *mockLogManager) GetTermUnsafe(ctx context.Context, index types.Index) (types.Term, error) {
-	if m.getTermUnsafeFunc != nil {
-		return m.getTermUnsafeFunc(ctx, index)
+	m.mu.Lock()
+	getTerm := m.getTermUnsafeFunc
+	m.mu.Unlock()
+	if getTerm != nil {
+		return getTerm(ctx, index)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
