@@ -2000,16 +2000,6 @@ func (rm *replicationManager) Stop() {
 			rm.logger.Debugw("Setting shutdown flag", "nodeID", rm.id)
 		}
 
-		// Close commit notification channel
-		// Draining explicitly here is less critical now that we wait for the loop,
-		// but it doesn't hurt.
-		select {
-		case <-rm.notifyCommitCh:
-			// Drain any pending notifications
-		default:
-		}
-		close(rm.notifyCommitCh)
-
 		// Clear peer states
 		if len(rm.peerStates) > 0 {
 			rm.logger.Debugw("Clearing peer states", "peerCount", len(rm.peerStates))

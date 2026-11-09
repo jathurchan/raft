@@ -1871,20 +1871,29 @@ func TestReplicationManager_Stop(t *testing.T) {
 	t.Run("StopsCommitLoop", func(t *testing.T) {
 		rm, _, _, _, _, _ := setupTestReplicationManager(t)
 
-		// Start some background activity
 		rm.triggerCommitCheck()
-
-		// Stop should terminate the commit loop
 		rm.Stop()
 
-		// Verify channel is closed (would panic if we try to send)
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("Expected panic when sending to closed channel")
-			}
-		}()
+		// The loop has exited, so this returns immediately.
+		rm.commitLoopWg.Wait()
+	})
 
-		rm.notifyCommitCh <- struct{}{}
+	t.Run("ConcurrentCommitCheckDoesNotPanic", func(t *testing.T) {
+		rm, _, _, _, _, _ := setupTestReplicationManager(t)
+
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range 1000 {
+					rm.triggerCommitCheck()
+				}
+			}()
+		}
+
+		rm.Stop()
+		wg.Wait()
 	})
 }
 
