@@ -1020,6 +1020,42 @@ func TestNetworkManager_SendInstallSnapshot_PreservesChunkFields(t *testing.T) {
 	testutil.AssertTrue(t, received.MoreChunks, "MoreChunks should cross the wire")
 }
 
+func TestNetworkManager_FailedRPCKeepsConnection(t *testing.T) {
+	nm, _, _, _ := setupDefaultNetworkManager(t, "node1-keep", "localhost:0", nil)
+	testutil.AssertNoError(t, nm.Start())
+	defer func() { _ = nm.Stop() }()
+
+	handler := &mockRPCHandler{}
+	handler.appendEntriesFunc = func(ctx context.Context, args *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+		return nil, errors.New("handler failed")
+	}
+	addr, cleanup := setupPeerServer(t, "localhost:0", handler)
+	defer cleanup()
+
+	peer := types.NodeID("peer1-keep")
+	nm.mu.Lock()
+	nm.peers[peer] = PeerConfig{ID: peer, Address: addr}
+	nm.mu.Unlock()
+
+	args := &types.AppendEntriesArgs{Term: 1, LeaderID: "node1-keep"}
+	_, err := nm.SendAppendEntries(context.Background(), peer, args)
+	testutil.AssertError(t, err)
+
+	nm.mu.RLock()
+	client := nm.peerClients[peer]
+	nm.mu.RUnlock()
+	client.mu.Lock()
+	conn := client.conn
+	client.mu.Unlock()
+
+	_, err = nm.SendAppendEntries(context.Background(), peer, args)
+	testutil.AssertError(t, err)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	testutil.AssertTrue(t, client.conn == conn, "a failed RPC must not replace the connection")
+}
+
 func TestNetworkManager_SendInstallSnapshot(t *testing.T) {
 	nm1, _, _, _ := setupDefaultNetworkManager(t, "node1-is", "localhost:0", nil)
 	err := nm1.Start()

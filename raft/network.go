@@ -109,6 +109,14 @@ type peerConnection struct {
 	connected  atomic.Bool
 }
 
+// hasConn reports whether a gRPC connection exists. A failed RPC leaves it in place,
+// since gRPC reconnects by itself and closing it would cancel other RPCs.
+func (c *peerConnection) hasConn() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn != nil
+}
+
 // rpcClient returns the current gRPC client, which a reconnect can replace.
 func (c *peerConnection) rpcClient() proto.RaftClient {
 	c.mu.Lock()
@@ -1224,7 +1232,7 @@ func (nm *gRPCNetworkManager) getOrCreatePeerClient(
 	client, exists := nm.peerClients[peerID]
 	nm.mu.RUnlock()
 
-	if exists && client.connected.Load() {
+	if exists && client.hasConn() {
 		return client, nil
 	}
 
@@ -1239,7 +1247,7 @@ func (nm *gRPCNetworkManager) getOrCreatePeerClientLocked(
 	peerID types.NodeID,
 ) (*peerConnection, error) {
 	client, exists := nm.peerClients[peerID]
-	if exists && client.connected.Load() {
+	if exists && client.hasConn() {
 		return client, nil // Another goroutine connected it
 	}
 
