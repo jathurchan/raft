@@ -662,7 +662,8 @@ func (rm *replicationManager) sendSingleHeartbeatAndWait(
 		return false
 	}
 
-	return reply.Success
+	// A reply in this term shows the peer accepts this leader, even if its log lags.
+	return reply.Term == term
 }
 
 // commitCheckLoop processes commit index advancement requests in background
