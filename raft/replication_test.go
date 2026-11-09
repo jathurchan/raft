@@ -2968,9 +2968,11 @@ func TestReplicationManager_AdditionalCoverage(t *testing.T) {
 		rm.mu.Lock()
 		rm.peerStates["node2"].NextIndex = 5
 		rm.mu.Unlock()
+		logMgr.mu.Lock()
 		logMgr.getTermUnsafeFunc = func(ctx context.Context, index types.Index) (types.Term, error) {
 			return 0, errors.New("term error")
 		}
+		logMgr.mu.Unlock()
 		testutil.AssertFalse(t, rm.sendSingleHeartbeatAndWait(context.Background(), "node2", 1, 0))
 	})
 
