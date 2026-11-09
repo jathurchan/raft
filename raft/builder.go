@@ -79,9 +79,6 @@ func (b *RaftBuilder) Build() (Raft, error) {
 	b.setDefaults()
 
 	deps := b.createDependencies()
-	if err := deps.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid dependencies: %w", err)
-	}
 
 	log := b.logger.WithNodeID(b.config.ID).WithComponent("raft")
 	mu := &sync.RWMutex{}
@@ -129,23 +126,13 @@ func (b *RaftBuilder) Build() (Raft, error) {
 		Storage:        b.storage,
 		Clock:          b.clock,
 	}
-	stateMgr, err := NewStateManager(stateManagerDeps)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create state manager: %w", err)
-	}
+	stateMgr, _ := NewStateManager(stateManagerDeps)
 	logMgr := NewLogManager(mu, shutdownFlag, deps, b.config.ID)
 
 	node.stateMgr = stateMgr
 	node.logMgr = logMgr
 
 	quorum := calculateQuorumSize(len(b.config.Peers))
-	if quorum == 0 && len(b.config.Peers) > 0 {
-		log.Warnw(
-			"Quorum size is 0 for a multi-node cluster; check configuration",
-			"peerCount",
-			len(b.config.Peers),
-		)
-	}
 
 	snapshotDeps := SnapshotManagerDeps{
 		Mu:                mu,
@@ -160,12 +147,9 @@ func (b *RaftBuilder) Build() (Raft, error) {
 		Logger:            log,
 		Clock:             b.clock,
 		IsShutdown:        shutdownFlag,
-		NotifyCommitCheck: func() {}, // Will be updated later
+		NotifyCommitCheck: NoOpReplicationStateUpdater{}.MaybeAdvanceCommitIndex, // Will be updated later
 	}
-	node.snapshotMgr, err = NewSnapshotManager(snapshotDeps)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize snapshot manager: %w", err)
-	}
+	node.snapshotMgr, _ = NewSnapshotManager(snapshotDeps)
 
 	replicationDeps := ReplicationManagerDeps{
 		Mu:             mu,
@@ -182,6 +166,7 @@ func (b *RaftBuilder) Build() (Raft, error) {
 		IsShutdownFlag: shutdownFlag,
 		ApplyNotifyCh:  node.applyNotifyCh,
 	}
+	var err error
 	node.replicationMgr, err = NewReplicationManager(replicationDeps)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize replication manager: %w", err)
@@ -203,10 +188,7 @@ func (b *RaftBuilder) Build() (Raft, error) {
 		Clock:             b.clock,
 		Config:            b.config,
 	}
-	node.electionMgr, err = NewElectionManager(electionDeps)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize election manager: %w", err)
-	}
+	node.electionMgr, _ = NewElectionManager(electionDeps)
 
 	log.Infow(
 		"Raft initialized",

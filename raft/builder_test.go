@@ -383,4 +383,72 @@ func TestRaftNodeBuilder_BuildWithTimeoutDefaults(t *testing.T) {
 	if raft == nil {
 		t.Error("Expected non-nil Raft instance")
 	}
+
+	if rn, ok := raft.(*raftNode); ok {
+		if sm, ok := rn.snapshotMgr.(*snapshotManager); ok && sm.notifyCommitCheck != nil {
+			sm.notifyCommitCheck()
+		}
+	}
+}
+
+func TestRaftNodeBuilder_BuildFailures(t *testing.T) {
+	t.Run("ValidationError", func(t *testing.T) {
+		builder := NewRaftBuilder()
+		if _, err := builder.Build(); err == nil {
+			t.Fatal("Expected validation error for empty builder")
+		}
+	})
+
+	t.Run("ReplicationManagerInitError", func(t *testing.T) {
+		builder := NewRaftBuilder().
+			WithConfig(Config{ID: "node1"}). // Empty Peers -> quorum == 0 -> ReplicationManager error
+			WithApplier(&mockApplier{}).
+			WithLogger(logger.NewNoOpLogger()).
+			WithStorage(&mockStorage{})
+
+		if _, err := builder.Build(); err == nil {
+			t.Fatal("Expected error when Peers map is empty")
+		}
+	})
+}
+
+func TestNoOpMetrics_AllMethods(t *testing.T) {
+	m := NewNoOpMetrics()
+	m.IncCounter("c", "k", "v")
+	m.AddCounter("c", 1.0, "k", "v")
+	m.SetGauge("g", 1.0, "k", "v")
+	m.ObserveHistogram("h", 1.0, "k", "v")
+	m.ObserveCommitIndex(1)
+	m.ObserveAppliedIndex(1)
+	m.ObserveTerm(1)
+	m.ObserveLeaderChange("node1", 1)
+	m.ObserveLeaderNotificationDropped()
+	m.ObserveLeadershipLost(1, "step_down")
+	m.ObserveApplyNotificationDropped()
+	m.ObserveApplyLoopStopped("shutdown")
+	m.ObserveRoleChange(types.RoleLeader, types.RoleCandidate, 1)
+	m.ObserveElectionStart(1, ElectionReasonTimeout)
+	m.ObserveVoteGranted(1)
+	m.ObserveLogState(1, 10, 1)
+	m.ObserveLogAppend(5, time.Millisecond, true)
+	m.ObserveLogRead(LogReadTypeEntries, time.Millisecond, true)
+	m.ObserveLogTruncate(LogTruncateTypePrefix, 3, time.Millisecond, true)
+	m.ObserveLogConsistencyError()
+	m.ObserveElectionElapsed("node1", 1, 5)
+	m.ObserveProposal(true, ProposalResultSuccess)
+	m.ObserveReadIndex(true, "lease")
+	m.ObserveSnapshot(SnapshotActionCapture, SnapshotStatusSuccess, "k", "v")
+	m.ObserveSnapshotRecovery(SnapshotStatusSuccess, SnapshotReasonShutdown)
+	m.ObservePeerReplication("node2", true, ReplicationResultSuccess)
+	m.ObserveHeartbeat("node2", true, time.Millisecond)
+	m.ObserveHeartbeatSent()
+	m.ObserveAppendEntriesHeartbeat()
+	m.ObserveAppendEntriesReplication()
+	m.ObserveAppendEntriesRejected("term")
+	m.ObserveEntriesReceived(2)
+	m.ObserveCommandBytesReceived(64)
+	m.ObserveTick(types.RoleFollower)
+	m.ObserveComponentStopTimeout("comp")
+	m.ObserveCommitCheckTriggered()
+	m.ObserveCommitCheckPending()
 }

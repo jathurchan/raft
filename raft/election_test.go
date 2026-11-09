@@ -2202,4 +2202,104 @@ func TestElectionManagerEdgeCases(t *testing.T) {
 			"Should not have quorum when quorum size > available votes",
 		)
 	})
+
+	t.Run("MaxElectionBackoffCap", func(t *testing.T) {
+		em, _, _, _, _, clock, _ := createTestElectionManager(t)
+		em.electionCount.Store(1000)
+		em.lastElectionTime.Store(clock.Now().UnixMilli())
+		em.defaultHandleElectionTimeout(context.Background())
+	})
+
+	t.Run("ProcessVoteReply_AlreadyLeaderForTerm", func(t *testing.T) {
+		em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
+		em.electionState.Store(int32(ElectionStateVoting))
+		em.resetVoteTracking(2)
+		em.recordVote("node1", true)
+		stateMgr.currentTerm = 2
+		stateMgr.currentRole = types.RoleLeader
+
+		em.processVoteReply("node2", 2, 2, &types.RequestVoteReply{
+			Term:        2,
+			VoteGranted: true,
+		})
+	})
+
+	t.Run("DefaultStartElection_RoleNotCandidateAfterBecomeCandidate", func(t *testing.T) {
+		em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
+		stateMgr.becomeCandidateFunc = func(ctx context.Context, reason ElectionReason) bool {
+			// Return true without changing role from RoleFollower
+			return true
+		}
+		stateMgr.currentRole = types.RoleFollower
+		em.defaultStartElection(context.Background())
+		testutil.AssertEqual(t, ElectionStateIdle, ElectionState(em.electionState.Load()))
+	})
+
+	t.Run("RecordElectionFailure_ResetAttempts", func(t *testing.T) {
+		em, _, _, _, _, _, _ := createTestElectionManager(t)
+		em.splitVoteDetector.electionAttempts = MaxElectionAttemptsBeforeReset
+		em.recordElectionFailure()
+		testutil.AssertEqual(t, ElectionAttemptResetValue, em.splitVoteDetector.electionAttempts)
+	})
+
+	t.Run("BecomeLeader_AlreadyLeaderForTerm", func(t *testing.T) {
+		em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
+		stateMgr.currentTerm = 3
+		stateMgr.currentRole = types.RoleLeader
+		em.becomeLeader(context.Background(), 3)
+	})
+
+	t.Run("BroadcastVoteRequests_ContextDoneWaitingForSemaphore", func(t *testing.T) {
+		em, _, _, networkMgr, _, _, _ := createTestElectionManager(t)
+		em.peers = make(map[types.NodeID]PeerConfig)
+		em.peers["node1"] = PeerConfig{Address: "localhost:8001"}
+		for i := 2; i <= 15; i++ {
+			id := types.NodeID("node" + string(rune('0'+i)))
+			em.peers[id] = PeerConfig{Address: "localhost:8002"}
+		}
+
+		var inFlight atomic.Int32
+		allWorkersBusy := make(chan struct{})
+		releaseWorkers := make(chan struct{})
+		var once sync.Once
+
+		networkMgr.sendRequestVoteFunc = func(ctx context.Context, target types.NodeID, args *types.RequestVoteArgs) (*types.RequestVoteReply, error) {
+			if inFlight.Add(1) == 10 {
+				once.Do(func() { close(allWorkersBusy) })
+			}
+			<-releaseWorkers
+			return &types.RequestVoteReply{Term: args.Term, VoteGranted: false}, nil
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		em.broadcastVoteRequests(ctx, &types.RequestVoteArgs{Term: 2, CandidateID: "node1"})
+
+		<-allWorkersBusy
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+		time.Sleep(10 * time.Millisecond)
+		close(releaseWorkers)
+		time.Sleep(20 * time.Millisecond)
+	})
+
+	t.Run("HandleRequestVote_CandidateHigherTermAndGrantVoteDenied", func(t *testing.T) {
+		em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
+		stateMgr.currentTerm = 1
+		stateMgr.currentRole = types.RoleCandidate
+		stateMgr.checkTermAndStepDownFunc = func(ctx context.Context, rpcTerm types.Term, rpcLeader types.NodeID) (bool, types.Term) {
+			return false, 1
+		}
+		stateMgr.grantVoteFunc = func(ctx context.Context, candidateID types.NodeID, term types.Term) bool {
+			return false
+		}
+
+		reply, err := em.HandleRequestVote(context.Background(), &types.RequestVoteArgs{
+			Term:         2,
+			CandidateID:  "node2",
+			LastLogIndex: 10,
+			LastLogTerm:  1,
+		})
+		testutil.AssertNoError(t, err)
+		testutil.AssertFalse(t, reply.VoteGranted)
+	})
 }

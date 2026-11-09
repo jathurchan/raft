@@ -1459,3 +1459,30 @@ func TestCompleteSnapshotDataCommitWithRollbackError(t *testing.T) {
 	testutil.AssertContains(t, err.Error(), "rename error")
 	testutil.AssertContains(t, err.Error(), "remove error")
 }
+
+func TestReadSnapshotMarkerCloseError(t *testing.T) {
+	fs := newMockFileSystem()
+	markerPath := "/tmp/raft/snapshot.marker"
+	fs.files[markerPath] = []byte(snapshotMarkerCommittedKey)
+	fs.OpenFunc = func(name string) (file, error) {
+		f, err := fs.defaultOpen(name)
+		if err != nil {
+			return nil, err
+		}
+		mf := f.(*mockFile)
+		mf.CloseFunc = func() error {
+			return errors.New("close error")
+		}
+		return mf, nil
+	}
+
+	rs := &defaultRecoveryService{
+		fs:     fs,
+		logger: &logger.NoOpLogger{},
+		dir:    "/tmp/raft",
+	}
+
+	committed, err := rs.readSnapshotMarker(markerPath)
+	testutil.AssertNoError(t, err)
+	testutil.AssertTrue(t, committed)
+}

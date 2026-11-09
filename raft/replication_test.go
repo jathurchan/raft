@@ -2732,3 +2732,340 @@ func TestReplicationManager_handleLogInconsistency(t *testing.T) {
 		)
 	})
 }
+
+type resetErrNetworkManager struct {
+	NetworkManager
+	resetErr error
+	resetCh  chan types.NodeID
+}
+
+func (r *resetErrNetworkManager) ResetConnection(ctx context.Context, peerID types.NodeID) error {
+	if r.resetCh != nil {
+		r.resetCh <- peerID
+	}
+	return r.resetErr
+}
+
+func TestReplicationManager_AdditionalCoverage(t *testing.T) {
+	t.Run("NewReplicationManager default ElectionTickCount with lease", func(t *testing.T) {
+		metrics := newMockMetrics()
+		deps := ReplicationManagerDeps{
+			Mu:             &sync.RWMutex{},
+			ID:             "node1",
+			Peers:          map[types.NodeID]PeerConfig{"node1": {ID: "node1"}},
+			QuorumSize:     1,
+			Cfg:            Config{FeatureFlags: FeatureFlags{EnableLeaderLease: true}},
+			StateMgr:       newMockStateManager(metrics),
+			LogMgr:         newMockLogManager(),
+			SnapshotMgr:    newMockSnapshotManager(),
+			NetworkMgr:     newMockNetworkManager(),
+			Metrics:        metrics,
+			Logger:         logger.NewNoOpLogger(),
+			Clock:          newMockClock(),
+			IsShutdownFlag: &atomic.Bool{},
+			ApplyNotifyCh:  make(chan struct{}, 1),
+		}
+		rm, err := NewReplicationManager(deps)
+		testutil.RequireNoError(t, err)
+		defer rm.Stop()
+	})
+
+	t.Run("AppendLeaderNoOp shutdown and append error", func(t *testing.T) {
+		rm, logMgr, _, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+
+		rm.isShutdown.Store(true)
+		rm.AppendLeaderNoOp()
+
+		rm.isShutdown.Store(false)
+		logMgr.appendEntriesUnsafeFunc = func(ctx context.Context, entries []types.LogEntry) error {
+			return errors.New("append error")
+		}
+		rm.AppendLeaderNoOp()
+	})
+
+	t.Run("hasCommittedInTerm error", func(t *testing.T) {
+		rm, logMgr, stateMgr, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+
+		rm.readReadyTerm.Store(0)
+		stateMgr.commitIndex = 5
+		logMgr.getTermUnsafeFunc = func(ctx context.Context, index types.Index) (types.Term, error) {
+			return 0, errors.New("term error")
+		}
+		testutil.AssertFalse(t, rm.hasCommittedInTerm(1))
+	})
+
+	t.Run("sendHeartbeatsAndCountResponses empty peers, timeout, and loop end", func(t *testing.T) {
+		rm, logMgr, _, networkMgr, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+
+		// Empty peers
+		savedPeers := rm.peerStates
+		rm.mu.Lock()
+		rm.peerStates = map[types.NodeID]*types.PeerState{}
+		rm.mu.Unlock()
+		testutil.AssertEqual(t, 0, rm.sendHeartbeatsAndCountResponses(context.Background(), 1))
+
+		// Single peer in peerStates with quorumSize 3 so remaining == 0 hits loop end
+		rm.mu.Lock()
+		rm.peerStates = map[types.NodeID]*types.PeerState{
+			"node2": {NextIndex: 1},
+		}
+		rm.quorumSize = 3
+		rm.mu.Unlock()
+		testutil.AssertEqual(t, 1, rm.sendHeartbeatsAndCountResponses(context.Background(), 1))
+
+		// Timeout case
+		rm.mu.Lock()
+		rm.peerStates = savedPeers
+		rm.quorumSize = 2
+		rm.mu.Unlock()
+		networkMgr.setSendAppendEntriesFunc(func(ctx context.Context, target types.NodeID, args *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_ = rm.sendHeartbeatsAndCountResponses(ctx, 1)
+
+		// sendSingleHeartbeatAndWait unknown peer and getPrevLogInfo failure
+		testutil.AssertFalse(t, rm.sendSingleHeartbeatAndWait(context.Background(), "unknown", 1, 0))
+		rm.mu.Lock()
+		rm.peerStates["node2"].NextIndex = 5
+		rm.mu.Unlock()
+		logMgr.getTermUnsafeFunc = func(ctx context.Context, index types.Index) (types.Term, error) {
+			return 0, errors.New("term error")
+		}
+		testutil.AssertFalse(t, rm.sendSingleHeartbeatAndWait(context.Background(), "node2", 1, 0))
+	})
+
+	t.Run("HandleAppendEntries and consistency/process edge cases", func(t *testing.T) {
+		rm, logMgr, stateMgr, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+
+		// Candidate in same term transitions to follower, then stale term under lock
+		stateMgr.getStateFunc = func() (types.Term, types.NodeRole, types.NodeID) {
+			return 2, types.RoleCandidate, ""
+		}
+		stateMgr.getStateUnsafeFunc = func() (types.Term, types.NodeRole, types.NodeID) {
+			return 10, types.RoleFollower, "leader1"
+		}
+		reply, err := rm.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
+			Term:     2,
+			LeaderID: "leader1",
+		})
+		testutil.AssertNoError(t, err)
+		testutil.AssertFalse(t, reply.Success)
+		testutil.AssertEqual(t, types.Term(10), reply.Term)
+		stateMgr.getStateFunc = nil
+		stateMgr.getStateUnsafeFunc = nil
+		stateMgr.mu.Lock()
+		stateMgr.currentTerm = 2
+		stateMgr.currentRole = types.RoleFollower
+		stateMgr.mu.Unlock()
+
+		// Log inconsistency with conflictIndex > 1 providing matchIndex hint
+		logMgr.entries[1] = types.LogEntry{Index: 1, Term: 1}
+		logMgr.entries[2] = types.LogEntry{Index: 2, Term: 1}
+		logMgr.lastIndex = 2
+		logMgr.firstIndex = 1
+		reply, err = rm.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
+			Term:         2,
+			LeaderID:     "leader1",
+			PrevLogIndex: 2,
+			PrevLogTerm:  2,
+		})
+		testutil.AssertNoError(t, err)
+		testutil.AssertFalse(t, reply.Success)
+		testutil.AssertEqual(t, types.Index(1), reply.MatchIndex)
+
+		// Log inconsistency: prevLogIndex > lastIndex
+		reply, err = rm.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
+			Term:         2,
+			LeaderID:     "leader1",
+			PrevLogIndex: 5,
+			PrevLogTerm:  2,
+		})
+		testutil.AssertNoError(t, err)
+		testutil.AssertFalse(t, reply.Success)
+		testutil.AssertEqual(t, types.Index(3), reply.ConflictIndex)
+
+		// Log inconsistency: GetTermUnsafe returns ErrCompacted and generic error
+		logMgr.getTermUnsafeFunc = func(ctx context.Context, index types.Index) (types.Term, error) {
+			return 0, ErrCompacted
+		}
+		consistent, cIdx, _ := rm.checkLogConsistencyLocked(context.Background(), 2, 1)
+		testutil.AssertFalse(t, consistent)
+		testutil.AssertEqual(t, types.Index(1), cIdx)
+
+		logMgr.getTermUnsafeFunc = func(ctx context.Context, index types.Index) (types.Term, error) {
+			return 0, errors.New("io error")
+		}
+		consistent, cIdx, _ = rm.checkLogConsistencyLocked(context.Background(), 2, 1)
+		testutil.AssertFalse(t, consistent)
+		testutil.AssertEqual(t, types.Index(2), cIdx)
+		logMgr.getTermUnsafeFunc = nil
+
+		// processEntriesLocked empty entries
+		idx, err := rm.processEntriesLocked(context.Background(), nil, 3)
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, types.Index(3), idx)
+
+		// processEntriesLocked GetTermUnsafe error and TruncateSuffixUnsafe error
+		logMgr.getTermUnsafeFunc = func(ctx context.Context, index types.Index) (types.Term, error) {
+			return 0, errors.New("term error")
+		}
+		logMgr.truncateSuffixUnsafeFunc = func(ctx context.Context, newLastIndexPlusOne types.Index) error {
+			return errors.New("truncate error")
+		}
+		_, err = rm.processEntriesLocked(context.Background(), []types.LogEntry{{Index: 1, Term: 2}}, 0)
+		testutil.AssertError(t, err)
+		logMgr.getTermUnsafeFunc = nil
+		logMgr.truncateSuffixUnsafeFunc = nil
+
+		// HandleAppendEntries processEntriesLocked error via appendNewEntriesLocked error
+		logMgr.appendEntriesUnsafeFunc = func(ctx context.Context, entries []types.LogEntry) error {
+			return errors.New("append error")
+		}
+		_, err = rm.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
+			Term:         2,
+			LeaderID:     "leader1",
+			PrevLogIndex: 0,
+			PrevLogTerm:  0,
+			Entries:      []types.LogEntry{{Index: 3, Term: 2}},
+		})
+		testutil.AssertError(t, err)
+		logMgr.appendEntriesUnsafeFunc = nil
+	})
+
+	t.Run("replicateToAllPeers, replicateToPeerInternal, and snapshot/compaction paths", func(t *testing.T) {
+		rm, logMgr, _, networkMgr, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+
+		rm.isShutdown.Store(true)
+		rm.replicateToAllPeers(1, false)
+		rm.replicateToPeerInternal(context.Background(), "node2", 1, 0, false)
+		rm.isShutdown.Store(false)
+
+		// Unknown peer in replicateToPeerInternal
+		rm.replicateToPeerInternal(context.Background(), "unknown", 1, 0, false)
+
+		// Snapshot needed: snapshotInProgress == true and false
+		logMgr.firstIndex = 5
+		logMgr.lastIndex = 10
+		rm.mu.Lock()
+		rm.peerStates["node2"].NextIndex = 2
+		rm.peerStates["node2"].SnapshotInProgress = true
+		rm.mu.Unlock()
+		rm.replicateToPeerInternal(context.Background(), "node2", 1, 0, false)
+
+		rm.mu.Lock()
+		rm.peerStates["node2"].SnapshotInProgress = false
+		rm.mu.Unlock()
+		rm.replicateToPeerInternal(context.Background(), "node2", 1, 0, false)
+		time.Sleep(10 * time.Millisecond)
+
+		// getPrevLogInfo fails with ErrCompacted and generic error
+		logMgr.firstIndex = 1
+		rm.mu.Lock()
+		rm.peerStates["node2"].NextIndex = 3
+		rm.peerStates["node2"].SnapshotInProgress = false
+		rm.mu.Unlock()
+		logMgr.getTermUnsafeFunc = func(ctx context.Context, index types.Index) (types.Term, error) {
+			return 0, ErrCompacted
+		}
+		rm.replicateToPeerInternal(context.Background(), "node2", 1, 0, false)
+		time.Sleep(10 * time.Millisecond)
+
+		logMgr.getTermUnsafeFunc = func(ctx context.Context, index types.Index) (types.Term, error) {
+			return 0, errors.New("generic term error")
+		}
+		rm.replicateToPeerInternal(context.Background(), "node2", 1, 0, false)
+		logMgr.getTermUnsafeFunc = nil
+
+		// getEntriesForPeer with MaxLogEntriesPerRequest <= 0, ErrCompacted, and generic error
+		rm.cfg.Options.MaxLogEntriesPerRequest = 0
+		logMgr.entries[2] = types.LogEntry{Index: 2, Term: 1}
+		logMgr.getEntriesUnsafeFunc = func(ctx context.Context, start, end types.Index) ([]types.LogEntry, error) {
+			return nil, ErrCompacted
+		}
+		rm.replicateToPeerInternal(context.Background(), "node2", 1, 0, false)
+		time.Sleep(10 * time.Millisecond)
+
+		logMgr.getEntriesUnsafeFunc = func(ctx context.Context, start, end types.Index) ([]types.LogEntry, error) {
+			return nil, errors.New("generic entries error")
+		}
+		rm.replicateToPeerInternal(context.Background(), "node2", 1, 0, false)
+		logMgr.getEntriesUnsafeFunc = nil
+
+		// SendAppendEntries returns error in replicateToPeerInternal
+		logMgr.entries[3] = types.LogEntry{Index: 3, Term: 1}
+		logMgr.lastIndex = 3
+		networkMgr.setSendAppendEntriesFunc(func(ctx context.Context, target types.NodeID, args *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+			return nil, errors.New("rpc error")
+		})
+		rm.replicateToPeerInternal(context.Background(), "node2", 1, 0, false)
+	})
+
+	t.Run("handleAppendError consecutive failures reset connection", func(t *testing.T) {
+		rm, _, _, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+
+		resetCh := make(chan types.NodeID, 1)
+		rm.networkMgr = &resetErrNetworkManager{
+			NetworkManager: rm.networkMgr,
+			resetErr:       errors.New("reset failed"),
+			resetCh:        resetCh,
+		}
+
+		rm.mu.Lock()
+		rm.peerStates["node2"].ConsecutiveFailures = 3
+		rm.mu.Unlock()
+
+		rm.handleAppendError("node2", 1, errors.New("net err"), false, time.Millisecond)
+		<-resetCh
+		time.Sleep(5 * time.Millisecond)
+	})
+
+	t.Run("handleAppendReply higher term and rejections", func(t *testing.T) {
+		rm, _, _, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+
+		args := &types.AppendEntriesArgs{Term: 1, LeaderID: "node1"}
+		rm.handleAppendReply("node2", 1, args, &types.AppendEntriesReply{Term: 2, Success: false}, false, time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
+
+		rm.handleAppendReply("node2", 1, args, &types.AppendEntriesReply{Term: 1, Success: false}, true, time.Millisecond)
+		rm.handleAppendReply("node2", 1, args, &types.AppendEntriesReply{Term: 1, Success: false}, false, time.Millisecond)
+	})
+
+	t.Run("findLastLogEntryWithTerm non-ErrNotFound error, extendLeaderLease disabled, calculateQuorumMatchIndex, triggerApplyNotify full, UpdatePeerAfterSnapshotSend zero lag", func(t *testing.T) {
+		rm, logMgr, _, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+
+		logMgr.findLastEntryWithTermUnsafeFunc = func(ctx context.Context, term types.Term, searchFromHint types.Index) (types.Index, error) {
+			return 0, errors.New("search error")
+		}
+		_, err := rm.findLastLogEntryWithTerm(1)
+		testutil.AssertError(t, err)
+
+		rm.leaderLeaseEnabled = false
+		rm.extendLeaderLease(time.Now())
+
+		testutil.AssertEqual(t, types.Index(0), rm.calculateQuorumMatchIndex(nil))
+		rm.quorumSize = 5
+		testutil.AssertEqual(t, types.Index(0), rm.calculateQuorumMatchIndex([]types.Index{1, 2}))
+
+		fullCh := make(chan struct{}, 1)
+		fullCh <- struct{}{}
+		rm.applyNotifyCh = fullCh
+		rm.triggerApplyNotify()
+
+		logMgr.lastIndex = 10
+		rm.UpdatePeerAfterSnapshotSend("node2", 15)
+		rm.mu.RLock()
+		testutil.AssertEqual(t, types.Index(0), rm.peerStates["node2"].ReplicationLag)
+		rm.mu.RUnlock()
+	})
+}
