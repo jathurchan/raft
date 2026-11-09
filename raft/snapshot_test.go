@@ -1377,3 +1377,20 @@ func TestRaftSnapshot_EdgeCases(t *testing.T) {
 	})
 }
 
+func TestRaftSnapshot_HandleInstall_IgnoresSnapshotAlreadyCommitted(t *testing.T) {
+	sm, mockStore, stateMgr, applier, _ := setupSnapshotManager(t)
+	stateMgr.commitIndex = 20
+
+	_, err := sm.HandleInstallSnapshot(context.Background(), &types.InstallSnapshotArgs{
+		Term:              4,
+		LeaderID:          "leader1",
+		LastIncludedIndex: 15,
+		LastIncludedTerm:  2,
+		Data:              []byte("older state"),
+	})
+
+	testutil.AssertNoError(t, err)
+	testutil.AssertFalse(t, mockStore.snapshotSaved, "an older snapshot must not be saved")
+	testutil.AssertFalse(t, applier.applierRestored, "an older snapshot must not roll back state")
+}
+
