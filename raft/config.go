@@ -82,6 +82,12 @@ type FeatureFlags struct {
 
 	// EnableLeaderLease enables leader leases for low-latency reads.
 	EnableLeaderLease bool
+
+	// EnablePreVote makes a node confirm it could win an election before raising its
+	// term, so a node that lost contact cannot disrupt a healthy leader. It adds one
+	// round trip to each election. Enable only when every node in the cluster supports
+	// it, because older nodes treat a pre-vote as a real vote.
+	EnablePreVote bool
 }
 
 // TuningParams configures advanced performance-related parameters.

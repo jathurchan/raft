@@ -515,6 +515,7 @@ Toggles for enabling/disabling specific Raft protocol optimizations:
 type FeatureFlags struct {
     EnableReadIndex   bool // Deprecated: no effect. ReadIndex is always available.
     EnableLeaderLease bool // Enables leader lease for faster ReadIndex (default: false).
+    EnablePreVote     bool // Checks that an election is winnable before raising the term (default: false).
 }
 ```
 
