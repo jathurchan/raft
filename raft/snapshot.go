@@ -756,9 +756,10 @@ func (sm *snapshotManager) processInstallSnapshot(
 		LastIncludedIndex: args.LastIncludedIndex,
 		LastIncludedTerm:  args.LastIncludedTerm,
 	}
-	if sm.isStaleSnapshot(incomingMeta) {
+	if sm.isStaleSnapshot(incomingMeta) ||
+		incomingMeta.LastIncludedIndex <= sm.stateMgr.GetCommitIndex() {
 		sm.logger.Infow(
-			"Ignoring stale InstallSnapshot RPC: index/term is not newer than current snapshot",
+			"Ignoring stale InstallSnapshot RPC: this node already has everything it contains",
 			"receivedIndex",
 			incomingMeta.LastIncludedIndex,
 			"receivedTerm",
