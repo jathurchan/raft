@@ -1294,6 +1294,13 @@ func (s *FileStorage) maybeTruncateAfterSnapshot(
 	if !s.options.AutoTruncateOnSnapshot {
 		return
 	}
+
+	// Keep recent entries so that a slightly lagging follower does not need a snapshot.
+	if uint64(metadata.LastIncludedIndex) <= s.options.RetainedLogSize {
+		return
+	}
+	metadata.LastIncludedIndex -= types.Index(s.options.RetainedLogSize)
+
 	if s.options.Features.EnableAsyncTruncation {
 		s.asyncTruncateLogPrefixFromSnapshot(metadata)
 	} else {
