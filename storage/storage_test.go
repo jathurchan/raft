@@ -1686,6 +1686,7 @@ func TestAsyncTruncateAfterSnapshot(t *testing.T) {
 	opts := DefaultFileStorageOptions()
 	opts.Features.EnableAsyncTruncation = true
 	opts.AutoTruncateOnSnapshot = true
+	opts.RetainedLogSize = 0
 	opts.TruncationTimeout = 100 * time.Millisecond // Use a short timeout for the test
 
 	expectedRemainingEntries := []types.LogEntry{
@@ -1702,7 +1703,7 @@ func TestAsyncTruncateAfterSnapshot(t *testing.T) {
 		WithDeps(func(deps *mockStorageDependencies) {
 			// Return the entries that should survive truncation
 			deps.indexSvc.ReadInRangeFunc = func(ctx context.Context, logPath string, indexMap []types.IndexOffsetPair, start, end types.Index) ([]types.LogEntry, int64, error) {
-				if start == 101 {
+				if start == 100 {
 					return expectedRemainingEntries, 200, nil
 				}
 				return []types.LogEntry{}, 0, nil
@@ -1731,7 +1732,7 @@ func TestAsyncTruncateAfterSnapshot(t *testing.T) {
 		Build()
 
 	snapshotMetadata := types.SnapshotMetadata{
-		LastIncludedIndex: 100, // Truncation should remove entries <= 100
+		LastIncludedIndex: 100, // Truncation should remove entries < 100
 		LastIncludedTerm:  5,
 	}
 	snapshotData := []byte("test-snapshot-data")
@@ -1754,6 +1755,7 @@ func TestSyncTruncateAfterSnapshot(t *testing.T) {
 	opts := DefaultFileStorageOptions()
 	opts.Features.EnableAsyncTruncation = false // Force synchronous truncation
 	opts.AutoTruncateOnSnapshot = true
+	opts.RetainedLogSize = 0
 
 	var truncationCalled bool
 	var mu sync.Mutex // Protect access to truncationCalled
@@ -3060,7 +3062,8 @@ func TestAdditionalStorageCoverage(t *testing.T) {
 		// Now test synchronous truncation failure in maybeTruncateAfterSnapshot
 		s.options.AutoTruncateOnSnapshot = true
 		s.options.Features.EnableAsyncTruncation = false
-		// LastIncludedIndex+1 = 11 > last+1 (6), so TruncateLogPrefix returns ErrIndexOutOfRange
+		s.options.RetainedLogSize = 0
+		// LastIncludedIndex = 10 > last+1 (6), so TruncateLogPrefix returns ErrIndexOutOfRange
 		s.maybeTruncateAfterSnapshot(context.Background(), meta)
 
 		// Also test synchronous truncation success in maybeTruncateAfterSnapshot

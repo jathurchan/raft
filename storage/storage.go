@@ -1134,6 +1134,26 @@ func (s *FileStorage) TruncateLogPrefix(ctx context.Context, index types.Index) 
 	return err
 }
 
+// ResetLog discards the whole log and replaces it with the given entry.
+func (s *FileStorage) ResetLog(ctx context.Context, entry types.LogEntry) error {
+	return s.logLocker.DoWrite(ctx, func() error {
+		offsets, err := s.logRewriter.Rewrite(ctx, []types.LogEntry{entry})
+		if err != nil {
+			return fmt.Errorf("failed to rewrite log file: %w", err)
+		}
+
+		s.setInMemoryLogBoundsLocked(entry.Index, entry.Index)
+		if s.options.Features.EnableIndexMap {
+			s.indexToOffsetMap = offsets
+		}
+
+		if err := s.saveMetadataLocked(); err != nil {
+			return fmt.Errorf("reset succeeded but failed to save metadata: %w", err)
+		}
+		return nil
+	})
+}
+
 // truncateLogRange rewrites the log file keeping only entries in [keepStart, keepEnd).
 // assumes logLocker write lock is held.
 func (s *FileStorage) truncateLogRange(ctx context.Context, keepStart, keepEnd types.Index) error {
@@ -1259,6 +1279,8 @@ func (s *FileStorage) SaveSnapshot(
 }
 
 // maybeTruncateAfterSnapshot performs log prefix truncation after a snapshot is saved.
+// The entry at the snapshot index is kept, because the next AppendEntries names it as
+// the previous entry.
 // If AutoTruncateOnSnapshot is disabled, no truncation is performed.
 // If enabled, truncation is done either asynchronously or synchronously depending
 // on the EnableAsyncTruncation feature flag.
@@ -1278,16 +1300,16 @@ func (s *FileStorage) maybeTruncateAfterSnapshot(
 		ctxWithTimeout, cancel := context.WithTimeout(ctx, s.getTruncationTimeout())
 		defer cancel()
 
-		err := s.TruncateLogPrefix(ctxWithTimeout, metadata.LastIncludedIndex+1)
+		err := s.TruncateLogPrefix(ctxWithTimeout, metadata.LastIncludedIndex)
 
 		if err != nil {
 			s.logger.Warnw("Synchronous log truncation after snapshot failed",
 				"error", err,
-				"index", metadata.LastIncludedIndex+1,
+				"index", metadata.LastIncludedIndex,
 			)
 		} else {
 			s.logger.Infow("Synchronous log truncation after snapshot succeeded",
-				"index", metadata.LastIncludedIndex+1,
+				"index", metadata.LastIncludedIndex,
 			)
 		}
 	}
@@ -1304,18 +1326,18 @@ func (s *FileStorage) asyncTruncateLogPrefixFromSnapshot(metadata types.Snapshot
 		defer cancel()
 
 		s.logger.Infow("Starting async log truncation after snapshot",
-			"truncateAfterIndex", metadata.LastIncludedIndex+1,
+			"truncateAfterIndex", metadata.LastIncludedIndex,
 			"timeout", timeout,
 		)
 
-		if err := s.TruncateLogPrefix(tCtx, metadata.LastIncludedIndex+1); err != nil {
+		if err := s.TruncateLogPrefix(tCtx, metadata.LastIncludedIndex); err != nil {
 			s.logger.Warnw("Async log truncation after snapshot failed",
 				"error", err,
-				"truncateAfterIndex", metadata.LastIncludedIndex+1,
+				"truncateAfterIndex", metadata.LastIncludedIndex,
 			)
 		} else {
 			s.logger.Infow("Async log truncation after snapshot succeeded",
-				"truncateAfterIndex", metadata.LastIncludedIndex+1,
+				"truncateAfterIndex", metadata.LastIncludedIndex,
 			)
 		}
 	}()

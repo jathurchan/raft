@@ -281,7 +281,7 @@ func (sm *snapshotManager) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to restore state during initialization: %w", err)
 	}
 
-	sm.maybeTruncateLog(ctx, meta.LastIncludedIndex)
+	sm.maybeTruncateLog(ctx, meta)
 
 	sm.logger.Infow("Snapshot manager initialization complete",
 		"lastSnapshotIndex", meta.LastIncludedIndex,
@@ -354,38 +354,21 @@ func (sm *snapshotManager) maybeRestoreState(
 	return nil
 }
 
-// maybeTruncateLog attempts to truncate the log prefix up to the snapshot index + 1.
+// maybeTruncateLog aligns the log with a snapshot loaded at startup.
 // This is best-effort; failure is logged but not fatal.
-func (sm *snapshotManager) maybeTruncateLog(ctx context.Context, snapshotIndex types.Index) {
-	if snapshotIndex == 0 {
+func (sm *snapshotManager) maybeTruncateLog(ctx context.Context, meta types.SnapshotMetadata) {
+	if meta.LastIncludedIndex == 0 {
 		return
 	}
-
-	truncateBeforeIndex := snapshotIndex + 1
-	sm.logger.Infow("Attempting log truncation based on loaded snapshot",
-		"snapshotIndex", snapshotIndex,
-		"truncateBeforeIndex", truncateBeforeIndex,
-	)
 
 	truncateCtx, cancel := context.WithTimeout(ctx, defaultSnapshotLogTruncateTimeout)
 	defer cancel()
 
-	if err := sm.logMgr.TruncatePrefix(truncateCtx, truncateBeforeIndex); err != nil {
-		sm.logger.Warnw(
-			"Log truncation failed (best effort)",
-			"error",
-			err,
-			"truncateBeforeIndex",
-			truncateBeforeIndex,
-		)
-		return
+	if err := sm.logMgr.InstallSnapshotBoundary(truncateCtx, meta); err != nil {
+		sm.logger.Warnw("Log truncation failed (best effort)",
+			"error", err,
+			"snapshotIndex", meta.LastIncludedIndex)
 	}
-
-	sm.logger.Infow(
-		"Log truncated successfully based on loaded snapshot",
-		"truncatedBeforeIndex",
-		truncateBeforeIndex,
-	)
 }
 
 // Tick checks if a new snapshot should be created based on the configured threshold.
@@ -654,7 +637,8 @@ func (sm *snapshotManager) maybeTriggerLogCompaction(
 		"minRequired", minEntries,
 	)
 
-	truncateBeforeIndex := snapshotIndex + 1
+	// Keep the entry at the snapshot index, which the next AppendEntries names as previous.
+	truncateBeforeIndex := snapshotIndex
 	truncateCtx, cancel := context.WithTimeout(ctx, defaultSnapshotLogTruncateTimeout)
 	defer cancel()
 
@@ -806,7 +790,7 @@ func (sm *snapshotManager) processInstallSnapshot(
 	}
 
 	sm.updateSnapshotMetadata(incomingMeta)
-	sm.truncateLogAfterSnapshot(ctx, incomingMeta.LastIncludedIndex)
+	sm.truncateLogAfterSnapshot(ctx, incomingMeta)
 
 	return reply, nil
 }
@@ -953,36 +937,22 @@ func (sm *snapshotManager) restoreSnapshotToStateMachine(
 	return nil
 }
 
-// truncateLogAfterSnapshot attempts log truncation after successfully installing a snapshot. Best effort.
+// truncateLogAfterSnapshot aligns the log with a snapshot received from the leader.
 func (sm *snapshotManager) truncateLogAfterSnapshot(
 	ctx context.Context,
-	snapshotIndex types.Index,
+	meta types.SnapshotMetadata,
 ) {
-	if snapshotIndex == 0 {
+	if meta.LastIncludedIndex == 0 {
 		return
 	}
-	truncateBeforeIndex := snapshotIndex + 1
-	sm.logger.Debugw(
-		"Attempting log truncation after installing snapshot",
-		"snapshotIndex",
-		snapshotIndex,
-		"truncateBeforeIndex",
-		truncateBeforeIndex,
-	)
 
 	truncateCtx, cancel := context.WithTimeout(ctx, defaultSnapshotLogTruncateTimeout)
 	defer cancel()
 
-	if err := sm.logMgr.TruncatePrefix(truncateCtx, truncateBeforeIndex); err != nil {
-		sm.logger.Warnw(
-			"Log truncation failed after snapshot installation (best effort)",
-			"error",
-			err,
-			"truncateBeforeIndex",
-			truncateBeforeIndex,
-		)
-	} else {
-		sm.logger.Infow("Log truncated successfully after snapshot installation", "truncatedBeforeIndex", truncateBeforeIndex)
+	if err := sm.logMgr.InstallSnapshotBoundary(truncateCtx, meta); err != nil {
+		sm.logger.Warnw("Log truncation failed after snapshot installation (best effort)",
+			"error", err,
+			"snapshotIndex", meta.LastIncludedIndex)
 	}
 }
 

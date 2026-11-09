@@ -957,6 +957,14 @@ func (s *MemoryStorage) GetLogEntry(
 }
 
 // TruncateLogPrefix truncates the prefix of the in-memory log.
+// ResetLog discards the whole log and replaces it with the given entry.
+func (s *MemoryStorage) ResetLog(ctx context.Context, entry types.LogEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.log = []types.LogEntry{entry}
+	return nil
+}
+
 func (s *MemoryStorage) TruncateLogPrefix(ctx context.Context, upToIndex types.Index) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -2144,6 +2144,75 @@ func TestReplicationManager_ReplicateAppendedEntries_NoPeersChecksCommit(t *test
 	testutil.AssertEqual(t, int32(1), metrics.triggered.Load())
 }
 
+func TestReplicationManager_SnapshotBoundary(t *testing.T) {
+	t.Run("sends a snapshot to a peer that needs the boundary entry", func(t *testing.T) {
+		rm, logMgr, _, networkMgr, snapshotMgr, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		logMgr.SetState(10, 20, 1)
+		logMgr.AddEntry(10, 1, nil)
+		rm.mu.Lock()
+		rm.peerStates["node2"].NextIndex = 10
+		rm.mu.Unlock()
+
+		sent := make(chan types.NodeID, 1)
+		snapshotMgr.sendSnapshotFunc = func(ctx context.Context, peer types.NodeID, term types.Term) { sent <- peer }
+		networkMgr.setSendAppendEntriesFunc(
+			func(ctx context.Context, target types.NodeID, args *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+				t.Error("AppendEntries should not be sent")
+				return nil, errors.New("unexpected")
+			},
+		)
+
+		rm.replicateToPeerInternal(context.Background(), "node2", 1, 0, false)
+
+		select {
+		case peer := <-sent:
+			testutil.AssertEqual(t, types.NodeID("node2"), peer)
+		case <-time.After(time.Second):
+			t.Fatal("expected a snapshot to be sent")
+		}
+	})
+
+	t.Run("still sends heartbeats to a peer that needs a snapshot", func(t *testing.T) {
+		rm, logMgr, _, networkMgr, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		logMgr.SetState(10, 20, 1)
+		logMgr.AddEntry(10, 1, nil)
+		rm.mu.Lock()
+		rm.peerStates["node2"].NextIndex = 5
+		rm.mu.Unlock()
+
+		sent := make(chan *types.AppendEntriesArgs, 1)
+		networkMgr.setSendAppendEntriesFunc(
+			func(ctx context.Context, target types.NodeID, args *types.AppendEntriesArgs) (*types.AppendEntriesReply, error) {
+				sent <- args
+				return &types.AppendEntriesReply{Term: args.Term, Success: true}, nil
+			},
+		)
+
+		rm.replicateToPeerInternal(context.Background(), "node2", 1, 0, true)
+
+		args := <-sent
+		testutil.AssertLen(t, args.Entries, 0)
+		testutil.AssertEqual(t, types.Index(10), args.PrevLogIndex)
+	})
+
+	t.Run("names the entry after the boundary when the previous entry is compacted", func(t *testing.T) {
+		rm, logMgr, _, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		logMgr.SetState(10, 20, 1)
+		logMgr.getTermUnsafeFunc = func(ctx context.Context, index types.Index) (types.Term, error) {
+			return 0, ErrCompacted
+		}
+
+		ok, conflictIndex, conflictTerm := rm.checkLogConsistencyLocked(context.Background(), 5, 1)
+
+		testutil.AssertFalse(t, ok)
+		testutil.AssertEqual(t, types.Index(11), conflictIndex)
+		testutil.AssertEqual(t, types.Term(0), conflictTerm)
+	})
+}
+
 func TestReplicationManager_ReplicationLoop(t *testing.T) {
 	const logLength = 250
 
@@ -2897,7 +2966,7 @@ func TestReplicationManager_AdditionalCoverage(t *testing.T) {
 		}
 		consistent, cIdx, _ := rm.checkLogConsistencyLocked(context.Background(), 2, 1)
 		testutil.AssertFalse(t, consistent)
-		testutil.AssertEqual(t, types.Index(1), cIdx)
+		testutil.AssertEqual(t, logMgr.GetFirstIndexUnsafe()+1, cIdx)
 
 		logMgr.getTermUnsafeFunc = func(ctx context.Context, index types.Index) (types.Term, error) {
 			return 0, errors.New("io error")

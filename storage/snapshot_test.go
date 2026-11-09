@@ -1068,3 +1068,87 @@ func TestSnapshotFileCloseErrors(t *testing.T) {
 	testutil.AssertEqual(t, meta, gotMeta)
 	testutil.AssertEqual(t, data, gotData)
 }
+
+func newDiskStorage(t *testing.T, dir string) Storage {
+	t.Helper()
+	opts := DefaultFileStorageOptions()
+	opts.Features.EnableAsyncTruncation = false
+	opts.RetainedLogSize = 0
+	st, err := NewFileStorageWithOptions(StorageConfig{Dir: dir}, opts, logger.NewNoOpLogger())
+	testutil.AssertNoError(t, err)
+	return st
+}
+
+func diskEntries(first, last types.Index) []types.LogEntry {
+	entries := make([]types.LogEntry, 0, last-first+1)
+	for i := first; i <= last; i++ {
+		entries = append(entries, types.LogEntry{Index: i, Term: 3, Command: []byte("cmd")})
+	}
+	return entries
+}
+
+func TestFileStorage_CompactionKeepsSnapshotBoundary(t *testing.T) {
+	ctx := context.Background()
+	st := newDiskStorage(t, t.TempDir())
+	testutil.AssertNoError(t, st.AppendLogEntries(ctx, diskEntries(1, 10)))
+
+	// A snapshot of the whole log must not leave it unable to accept the next entry.
+	meta := types.SnapshotMetadata{LastIncludedIndex: 10, LastIncludedTerm: 3}
+	testutil.AssertNoError(t, st.SaveSnapshot(ctx, meta, []byte("state")))
+
+	testutil.AssertEqual(t, types.Index(10), st.FirstLogIndex())
+	testutil.AssertEqual(t, types.Index(10), st.LastLogIndex())
+
+	boundary, err := st.GetLogEntry(ctx, 10)
+	testutil.AssertNoError(t, err)
+	testutil.AssertEqual(t, types.Term(3), boundary.Term)
+
+	testutil.AssertNoError(t, st.AppendLogEntries(ctx, diskEntries(11, 12)))
+	testutil.AssertEqual(t, types.Index(12), st.LastLogIndex())
+}
+
+func TestFileStorage_ResetLog(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st := newDiskStorage(t, dir)
+	testutil.AssertNoError(t, st.AppendLogEntries(ctx, diskEntries(1, 5)))
+
+	boundary := types.LogEntry{Index: 100, Term: 7}
+	testutil.AssertNoError(t, st.ResetLog(ctx, boundary))
+	testutil.AssertEqual(t, types.Index(100), st.FirstLogIndex())
+	testutil.AssertEqual(t, types.Index(100), st.LastLogIndex())
+
+	testutil.AssertNoError(t, st.AppendLogEntries(ctx, diskEntries(101, 102)))
+	testutil.AssertNoError(t, st.Close())
+
+	reopened := newDiskStorage(t, dir)
+	testutil.AssertEqual(t, types.Index(100), reopened.FirstLogIndex())
+	testutil.AssertEqual(t, types.Index(102), reopened.LastLogIndex())
+
+	got, err := reopened.GetLogEntry(ctx, 100)
+	testutil.AssertNoError(t, err)
+	testutil.AssertEqual(t, types.Term(7), got.Term)
+}
+
+func TestFileStorage_ResetLog_ReportsFailures(t *testing.T) {
+	t.Run("rewrite failure", func(t *testing.T) {
+		s, _ := newTestStorageBuilder(t).WithDeps(func(deps *mockStorageDependencies) {
+			deps.logRewriter.rewriteFunc = func(context.Context, []types.LogEntry) ([]types.IndexOffsetPair, error) {
+				return nil, errors.New("rewrite failed")
+			}
+		}).Build()
+
+		testutil.AssertError(t, s.ResetLog(context.Background(), types.LogEntry{Index: 9, Term: 1}))
+	})
+
+	t.Run("metadata failure", func(t *testing.T) {
+		s, _ := newTestStorageBuilder(t).WithDeps(func(deps *mockStorageDependencies) {
+			deps.metadataSvc.SaveMetadataFunc = func(string, logMetadata, bool) error {
+				return errors.New("save failed")
+			}
+		}).Build()
+
+		testutil.AssertError(t, s.ResetLog(context.Background(), types.LogEntry{Index: 9, Term: 1}))
+	})
+}
+
