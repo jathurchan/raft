@@ -178,6 +178,8 @@ type InstallSnapshotArgs struct {
 	LastIncludedIndex Index  // Snapshot replaces entries up to this index
 	LastIncludedTerm  Term   // Term of lastIncludedIndex
 	Data              []byte // Snapshot chunk data
+	Offset            uint64 // Byte position of this chunk within the snapshot
+	MoreChunks        bool   // True if further chunks follow
 }
 
 // InstallSnapshotReply encapsulates the reply for the InstallSnapshot RPC.

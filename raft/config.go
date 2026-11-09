@@ -89,7 +89,8 @@ type TuningParams struct {
 	// MaxApplyBatchSize limits the number of entries applied in a single batch.
 	MaxApplyBatchSize int
 	// MaxSnapshotChunkSize sets the maximum snapshot chunk size (bytes) during InstallSnapshot RPCs.
-	// 0 disables chunking.
+	// 0 disables chunking, so the whole snapshot must fit in one gRPC message.
+	// Enable only when every node in the cluster supports chunked transfer.
 	MaxSnapshotChunkSize int
 }
 

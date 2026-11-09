@@ -40,6 +40,10 @@ var (
 	// and a conflicting operation is attempted.
 	ErrSnapshotInProgress = errors.New("raft: snapshot already in progress")
 
+	// ErrSnapshotChunkOutOfOrder is returned when a snapshot chunk does not follow
+	// the chunks already received. The sender must restart the transfer.
+	ErrSnapshotChunkOutOfOrder = errors.New("raft: snapshot chunk out of order")
+
 	// ErrQuorumUnreachable is returned when the node cannot contact a quorum of peers
 	// to complete a consensus operation.
 	ErrQuorumUnreachable = errors.New("raft: quorum unreachable")
