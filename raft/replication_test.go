@@ -744,6 +744,88 @@ func TestReplicationManager_Propose_ConcurrentCallersGetUniqueIndexes(t *testing
 	}
 }
 
+func TestReplicationManager_Propose_GroupCommit(t *testing.T) {
+	queued := func(rm *replicationManager) int {
+		rm.proposeMu.Lock()
+		defer rm.proposeMu.Unlock()
+		return len(rm.proposeQueue)
+	}
+
+	blockFirstAppend := func(logMgr *mockLogManager) (<-chan struct{}, chan struct{}, func() []int) {
+		var mu sync.Mutex
+		var sizes []int
+		started := make(chan struct{})
+		release := make(chan struct{})
+		logMgr.appendEntriesUnsafeFunc = func(ctx context.Context, entries []types.LogEntry) error {
+			mu.Lock()
+			sizes = append(sizes, len(entries))
+			first := len(sizes) == 1
+			mu.Unlock()
+			if first {
+				close(started)
+				<-release
+			}
+			return nil
+		}
+		return started, release, func() []int {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]int(nil), sizes...)
+		}
+	}
+
+	t.Run("concurrent proposals share one append", func(t *testing.T) {
+		rm, logMgr, _, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		started, release, appendSizes := blockFirstAppend(logMgr)
+
+		const waiting = 32
+		indexes := make(chan types.Index, waiting+1)
+		propose := func() {
+			index, _, _, err := rm.Propose(context.Background(), []byte("cmd"))
+			testutil.AssertNoError(t, err)
+			indexes <- index
+		}
+
+		go propose()
+		<-started
+		for range waiting {
+			go propose()
+		}
+		for queued(rm) < waiting {
+			time.Sleep(time.Millisecond)
+		}
+		close(release)
+
+		seen := make(map[types.Index]bool)
+		for range waiting + 1 {
+			seen[<-indexes] = true
+		}
+
+		testutil.AssertEqual(t, waiting+1, len(seen))
+		for index := types.Index(1); index <= waiting+1; index++ {
+			testutil.AssertTrue(t, seen[index], "index %d should be assigned", index)
+		}
+		testutil.AssertEqual(t, []int{1, waiting}, appendSizes())
+	})
+
+	t.Run("returns when the caller's context expires", func(t *testing.T) {
+		rm, logMgr, _, _, _, _ := setupTestReplicationManager(t)
+		defer rm.Stop()
+		started, release, _ := blockFirstAppend(logMgr)
+		defer close(release)
+
+		go func() { _, _, _, _ = rm.Propose(context.Background(), []byte("first")) }()
+		<-started
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, _, _, err := rm.Propose(ctx, []byte("second"))
+
+		testutil.AssertErrorIs(t, err, ErrTimeout)
+	})
+}
+
 func TestReplicationManager_VerifyLeadership_ReturnsOnQuorum(t *testing.T) {
 	rm, _, _, networkMgr, _, _ := setupTestReplicationManager(t)
 	defer rm.Stop()

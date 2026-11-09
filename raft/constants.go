@@ -77,6 +77,9 @@ const (
 	DefaultServerMaxConnectionAgeGrace = 5 * time.Second
 )
 
+// Maximum number of concurrent proposals written to the log in one append and fsync.
+const maxProposalBatchSize = 128
+
 // Capacity of the leader change channels. When the application falls behind,
 // its oldest notifications are dropped so that the newest is always available.
 const leaderEventBufferSize = 16
