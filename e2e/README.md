@@ -12,7 +12,7 @@ You need Go, `kubectl`, and a running Docker daemon. The runner installs `kind` 
 ./e2e/run.sh 'TestE2E/failover/kill_leader'  # one scenario
 ```
 
-A full run takes about an hour and needs about 6 GB of memory for Docker. It creates a `kind` cluster named `raft-e2e` with its own kubeconfig, so your Kubernetes settings are not touched. The cluster is deleted afterwards.
+A full run takes about 30 minutes and needs about 6 GB of memory for Docker. It creates a `kind` cluster named `raft-e2e` with its own kubeconfig, so your Kubernetes settings are not touched. The cluster is deleted afterwards.
 
 | Variable | Effect |
 | :--- | :--- |

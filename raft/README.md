@@ -30,6 +30,8 @@ This Raft implementation includes the following key features:
 
 * **ReadIndex Protocol:** Mechanism for linearizable reads (`ReadIndex` method) without the overhead of full log replication for every read request, ensuring data consistency with reduced latency.
 * **Leader Lease:** Time-based optimization (enabled by `EnableLeaderLease` flag) that allows the leader to serve `ReadIndex` requests even faster under stable network conditions by relying on a time-based lease, further reducing read latency.
+* **Group Commit:** Concurrent `Propose` calls share one log write and fsync.
+* **PreVote:** Optional check (enabled by `EnablePreVote` flag) that an election is winnable before a node raises its term, so a rejoining node does not disrupt the leader.
 * **Batched Operations:** Log entries can be batched for replication (`MaxLogEntriesPerRequest`) and application to the state machine (`MaxApplyBatchSize`), improving throughput for write-heavy workloads.
 
 ### Production-Ready Features
@@ -187,7 +189,8 @@ Manages the lifecycle of Raft snapshots for compaction and synchronization.
 * Captures application state via `Applier`.
 * Persists snapshots and tracks metadata.
 * Handles `InstallSnapshot` RPCs for lagging followers.
-* Compacts log after successful snapshot.
+* Compacts log after successful snapshot, keeping the snapshot's last entry so replication can continue from it.
+* Sends snapshots in chunks when `MaxSnapshotChunkSize` is set.
 
 ### Key External Interfaces
 
@@ -360,7 +363,7 @@ func createRaftNode(nodeID types.NodeID, listenAddr string, peers map[types.Node
         ID:    nodeID,
         Peers: peers,
         Options: raft.Options{
-            ElectionTickCount:     10,  // 1 second election timeout
+            ElectionTickCount:     10,  // 1 second base election timeout
             HeartbeatTickCount:    1,   // 100ms heartbeat interval
             SnapshotThreshold:     100, // Snapshot after 100 entries
         },
@@ -493,8 +496,9 @@ Defines fundamental Raft operational parameters:
 
 ```go
 type Options struct {
-    ElectionTickCount     int           // Ticks follower waits before starting election (default: 10).
-    HeartbeatTickCount    int           // Ticks leader waits between sending heartbeats (default: 1).
+    ElectionTickCount     int           // Base ticks a follower waits before starting an election (default: 50).
+    HeartbeatTickCount    int           // Ticks leader waits between sending heartbeats (default: 5).
+    ElectionRandomizationFactor float64 // Randomizes each election timeout above the base (default: 2.0).
     MaxLogEntriesPerRequest int         // Max log entries in one AppendEntries RPC (default: 100).
     SnapshotThreshold     int           // Log entries since last snapshot to trigger new one (default: 10000).
     ApplyEntryTimeout     time.Duration // Max time to apply one log entry to state machine (default: 5s).
@@ -617,13 +621,19 @@ Integration tests (`raft_integration_test.go`) are designed to validate the beha
 
 These tests are crucial for ensuring that the different components of the Raft implementation work together correctly and that the system is resilient to failures.
 
+### End-to-End Tests
+
+The suite in [`e2e/`](../e2e/README.md) runs a 5-node cluster on `kind` and injects pod kills, process crashes, machine freezes, and network partitions while clients read and write. Run it with `./e2e/run.sh`.
+
 -----
 
 ## Optimizations
 
 ### ReadIndex for Linearizable Reads
 
-Achieve strongly consistent reads using `Raft.ReadIndex()`. This confirms leadership and returns a commit index. Your application must then wait for its state machine to apply entries up to this index before reading its state.
+Achieve strongly consistent reads using `Raft.ReadIndex()`. This confirms leadership and returns a commit index. Your application must then wait until `Status().LastApplied` reaches this index before reading its state. Do not count `Applier` calls instead, because a new leader's no-op entry uses a log index without reaching the `Applier`.
+
+A new leader returns `ErrUnavailable` until an entry from its term commits, so treat that error as retryable.
 
 ```go
 commitIndex, err := raftNode.ReadIndex(context.Background())
@@ -638,7 +648,7 @@ log.Printf("Linearizable read possible up to commit index %d\n", commitIndex)
 
 ### Leader Lease Optimization
 
-If `EnableLeaderLease` is set (`raft/config.go`), the leader can serve `ReadIndex` requests based on a time lease without contacting a quorum, reducing latency.
+If `EnableLeaderLease` is set (`raft/config.go`), the leader can serve `ReadIndex` requests based on a time lease without contacting a quorum, reducing latency. The lease is extended only by a quorum of replies, and is timed from when the requests were sent.
 
 ```go
 // In your Raft Config:
