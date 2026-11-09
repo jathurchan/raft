@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jathurchan/raft/logger"
+	"github.com/jathurchan/raft/testutil"
 	"github.com/jathurchan/raft/types"
 )
 
@@ -53,6 +54,7 @@ func createTestRaftNode(
 		applyCh:             make(chan types.ApplyMsg, 100),
 		applyNotifyCh:       make(chan struct{}, 1),
 		leaderChangeCh:      make(chan types.NodeID, 1),
+		leaderEventCh:       make(chan types.NodeID, leaderEventBufferSize),
 		applyLoopStopCh:     make(chan struct{}),
 		applyLoopDoneCh:     make(chan struct{}),
 		applyEntryTimeout:   1 * time.Second,
@@ -709,7 +711,7 @@ func TestRaft_RaftNode_Getters(t *testing.T) {
 		r, _, _, _, _, _, _, _ := createTestRaftNode(t)
 
 		got := r.LeaderChangeChannel()
-		want := r.leaderChangeCh
+		want := r.leaderEventCh
 
 		if got != want {
 			t.Errorf(
@@ -1031,6 +1033,78 @@ func TestRaft_RaftNode_ApplyCommittedEntries(t *testing.T) {
 			// success
 		case <-time.After(100 * time.Millisecond):
 			t.Errorf("Apply loop did not stop in time")
+		}
+	})
+}
+
+func TestRaft_RaftNode_LeaderChangeChannel(t *testing.T) {
+	runHandler := func(r *raftNode) <-chan struct{} {
+		done := make(chan struct{})
+		go func() {
+			r.handleLeaderChanges()
+			close(done)
+		}()
+		return done
+	}
+
+	t.Run("delivers every event to the application", func(t *testing.T) {
+		r, _, _, _, _, _, _, _ := createTestRaftNode(t)
+		done := runHandler(r)
+		defer func() {
+			close(r.stopCh)
+			<-done
+		}()
+
+		for i := range 200 {
+			want := types.NodeID(fmt.Sprintf("node%d", i))
+			r.leaderChangeCh <- want
+
+			select {
+			case got := <-r.LeaderChangeChannel():
+				testutil.AssertEqual(t, want, got)
+			case <-time.After(time.Second):
+				t.Fatalf("event %d was not delivered to the application", i)
+			}
+		}
+	})
+
+	t.Run("keeps the newest event for a slow reader", func(t *testing.T) {
+		r, _, _, _, _, _, _, _ := createTestRaftNode(t)
+		done := runHandler(r)
+		defer func() {
+			close(r.stopCh)
+			<-done
+		}()
+
+		const events = leaderEventBufferSize * 4
+		for i := range events {
+			r.leaderChangeCh <- types.NodeID(fmt.Sprintf("node%d", i))
+		}
+		time.Sleep(50 * time.Millisecond)
+
+		var last types.NodeID
+		received := 0
+		for len(r.LeaderChangeChannel()) > 0 {
+			last = <-r.LeaderChangeChannel()
+			received++
+		}
+
+		testutil.AssertEqual(t, leaderEventBufferSize, received)
+		testutil.AssertEqual(t, types.NodeID(fmt.Sprintf("node%d", events-1)), last)
+	})
+
+	t.Run("closes when the handler stops", func(t *testing.T) {
+		r, _, _, _, _, _, _, _ := createTestRaftNode(t)
+		done := runHandler(r)
+
+		close(r.stopCh)
+		<-done
+
+		select {
+		case _, ok := <-r.LeaderChangeChannel():
+			testutil.AssertFalse(t, ok, "channel should be closed")
+		case <-time.After(time.Second):
+			t.Fatal("LeaderChangeChannel was not closed")
 		}
 	})
 }
