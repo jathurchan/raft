@@ -393,9 +393,9 @@ func (sm *stateManager) BecomeCandidate(ctx context.Context, reason ElectionReas
 
 	currentTerm, currentRole, _ := sm.GetStateUnsafe()
 
-	// Only followers can become candidates
-	if currentRole != types.RoleFollower {
-		sm.logger.Debugw("Cannot become candidate: not a follower",
+	// Followers start elections, and candidates retry them after a timeout
+	if currentRole == types.RoleLeader {
+		sm.logger.Debugw("Cannot become candidate: already leader",
 			"currentRole", currentRole.String(),
 			"reason", reason,
 			"nodeID", sm.id)

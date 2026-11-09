@@ -340,6 +340,18 @@ func TestStateManager_BecomeCandidate_NotFollower(t *testing.T) {
 	testutil.AssertFalse(t, result)
 }
 
+func TestStateManager_BecomeCandidate_CandidateRetriesInNewTerm(t *testing.T) {
+	sm, _, _ := createTestStateManager(t)
+	sm.role = types.RoleCandidate
+	sm.currentTerm = 2
+
+	result := sm.BecomeCandidate(context.Background(), ElectionReasonTimeout)
+
+	testutil.AssertTrue(t, result)
+	testutil.AssertEqual(t, types.RoleCandidate, sm.role)
+	testutil.AssertEqual(t, types.Term(3), sm.currentTerm)
+}
+
 func TestStateManager_BecomeCandidate_PersistenceFailure(t *testing.T) {
 	sm, storage, _ := createTestStateManager(t)
 

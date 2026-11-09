@@ -360,11 +360,44 @@ func TestTick_DoesNotHoldSharedMutexWhileReadingState(t *testing.T) {
 	testutil.AssertTrue(t, checked, "Tick should read the node state")
 }
 
+func TestTick_CandidateTimeoutStartsNewElection(t *testing.T) {
+	em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
+	stateMgr.mu.Lock()
+	stateMgr.currentRole = types.RoleCandidate
+	stateMgr.currentTerm = 2
+	stateMgr.mu.Unlock()
+	em.electionState.Store(int32(ElectionStateVoting))
+
+	startedAtTerm := make(chan types.Term, 1)
+	em.startElection = func(ctx context.Context) {
+		term, _, _ := stateMgr.GetState()
+		startedAtTerm <- term
+	}
+
+	em.timerMu.Lock()
+	em.electionElapsed = em.randomizedPeriod
+	em.timerMu.Unlock()
+
+	em.Tick(context.Background())
+
+	select {
+	case term := <-startedAtTerm:
+		testutil.AssertEqual(t, types.Term(2), term)
+	default:
+		t.Fatal("a candidate whose election timed out should start a new election")
+	}
+
+	em.timerMu.Lock()
+	elapsed := em.electionElapsed
+	em.timerMu.Unlock()
+	testutil.AssertEqual(t, 0, elapsed, "starting an election should reset the timer")
+}
+
 func TestTick(t *testing.T) {
 	t.Run("FollowerTick_NoElection", func(t *testing.T) {
 		em, stateMgr, _, _, _, _, _ := createTestElectionManager(t)
 		stateMgr.currentRole = types.RoleFollower
-		em.electionElapsed = em.randomizedPeriod - 1 // One tick away from triggering
+		em.electionElapsed = em.randomizedPeriod - 2 // Still short of the timeout after this tick
 
 		ctx := context.Background()
 		em.Tick(ctx)
@@ -373,7 +406,7 @@ func TestTick(t *testing.T) {
 		period, elapsed := em.randomizedPeriod, em.electionElapsed
 		em.timerMu.Unlock()
 
-		testutil.AssertEqual(t, period, elapsed, "Election elapsed should increment by 1")
+		testutil.AssertEqual(t, period-1, elapsed, "Election elapsed should increment by 1")
 		// Should not have started election yet
 		testutil.AssertFalse(t, em.electionInFlight.Load(), "Election should not be in flight yet")
 	})
