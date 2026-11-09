@@ -158,6 +158,19 @@ func TestNewStateManager_InvalidDeps(t *testing.T) {
 				Storage:        nil,
 			},
 		},
+		{
+			name: "nil clock",
+			deps: StateManagerDeps{
+				ID:             testNodeID,
+				Mu:             &sync.RWMutex{},
+				IsShutdown:     &atomic.Bool{},
+				LeaderChangeCh: make(chan types.NodeID, 1),
+				Logger:         logger.NewNoOpLogger(),
+				Metrics:        newMockMetrics(),
+				Storage:        newMockStorage(),
+				Clock:          nil,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1382,4 +1395,79 @@ func TestStateManager_ConcurrentAccess(t *testing.T) {
 	// Verify state is still consistent
 	issues := sm.ValidateState()
 	testutil.AssertLen(t, issues, 0)
+}
+
+func TestStateManager_AdditionalCoverage(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("BecomeCandidateForTerm_ShuttingDown", func(t *testing.T) {
+		sm, _, _, isShutdown := createTestStateManagerWithShutdown(t)
+		isShutdown.Store(true)
+		testutil.AssertFalse(t, sm.BecomeCandidateForTerm(ctx, 5))
+	})
+
+	t.Run("BecomeFollower_PersistFailure", func(t *testing.T) {
+		sm, store, _ := createTestStateManager(t)
+		store.setFailure("SaveState", errors.New("save failed"))
+		defer store.clearFailures()
+
+		sm.BecomeFollower(ctx, 5, "leader-1")
+		testutil.AssertEqual(t, types.Term(5), sm.currentTerm)
+		testutil.AssertEqual(t, types.RoleFollower, sm.role)
+	})
+
+	t.Run("CheckTermAndStepDown_PersistFailure", func(t *testing.T) {
+		sm, store, _ := createTestStateManager(t)
+		store.setFailure("SaveState", errors.New("save failed"))
+		defer store.clearFailures()
+
+		steppedDown, prevTerm := sm.CheckTermAndStepDown(ctx, 5, "leader-1")
+		testutil.AssertTrue(t, steppedDown)
+		testutil.AssertEqual(t, types.Term(0), prevTerm)
+	})
+
+	t.Run("PersistState_AlreadyInProgress", func(t *testing.T) {
+		sm, _, _ := createTestStateManager(t)
+		sm.persistenceInProgress.Store(true)
+		err := sm.persistState(ctx, 1, testNodeID)
+		testutil.AssertError(t, err)
+	})
+
+	t.Run("PersistStateWithRetry_AllBranches", func(t *testing.T) {
+		sm, store, _ := createTestStateManager(t)
+		sm.clock = NewStandardClock()
+
+		// 1. Context already cancelled before attempt 1
+		cancelCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		err := sm.persistStateWithRetry(cancelCtx, 1, testNodeID)
+		testutil.AssertError(t, err)
+
+		// 2. Fails on attempt 1, succeeds on attempt 2
+		attempts := 0
+		store.hookSaveState = func(ctx context.Context, state types.PersistentState) error {
+			attempts++
+			if attempts == 1 {
+				return errors.New("transient error")
+			}
+			return nil
+		}
+		err = sm.persistStateWithRetry(ctx, 2, testNodeID)
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, 2, attempts)
+
+		// 3. Fails all retries
+		store.hookSaveState = func(ctx context.Context, state types.PersistentState) error {
+			return errors.New("persistent error")
+		}
+		err = sm.persistStateWithRetry(ctx, 3, testNodeID)
+		testutil.AssertError(t, err)
+		store.hookSaveState = nil
+	})
+
+	t.Run("NotifyLeaderChange_NilChannel", func(t *testing.T) {
+		sm, _, _ := createTestStateManager(t)
+		sm.leaderChangeCh = nil
+		sm.notifyLeaderChange("leader-1")
+	})
 }

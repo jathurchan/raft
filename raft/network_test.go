@@ -17,6 +17,7 @@ import (
 	"github.com/jathurchan/raft/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -1332,4 +1333,286 @@ func TestNetworkManager_LocalAddr(t *testing.T) {
 		"LocalAddr should still return originally resolved address after stop, got %s",
 		addrAfterStop,
 	)
+}
+
+type fakeListener struct {
+	acceptErr error
+	closeErr  error
+	closed    chan struct{}
+	once      sync.Once
+}
+
+func newFakeListener(acceptErr, closeErr error) *fakeListener {
+	return &fakeListener{
+		acceptErr: acceptErr,
+		closeErr:  closeErr,
+		closed:    make(chan struct{}),
+	}
+}
+
+func (l *fakeListener) Accept() (net.Conn, error) {
+	if l.acceptErr != nil {
+		return nil, l.acceptErr
+	}
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *fakeListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return l.closeErr
+}
+
+func (l *fakeListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345}
+}
+
+type fakeRaftClient struct {
+	requestVoteErr     error
+	appendEntriesErr   error
+	installSnapshotErr error
+}
+
+func (f *fakeRaftClient) RequestVote(
+	ctx context.Context,
+	in *proto.RequestVoteRequest,
+	opts ...grpc.CallOption,
+) (*proto.RequestVoteResponse, error) {
+	if f.requestVoteErr != nil {
+		return nil, f.requestVoteErr
+	}
+	return &proto.RequestVoteResponse{Term: in.Term, VoteGranted: true}, nil
+}
+
+func (f *fakeRaftClient) AppendEntries(
+	ctx context.Context,
+	in *proto.AppendEntriesRequest,
+	opts ...grpc.CallOption,
+) (*proto.AppendEntriesResponse, error) {
+	if f.appendEntriesErr != nil {
+		return nil, f.appendEntriesErr
+	}
+	return &proto.AppendEntriesResponse{Term: in.Term, Success: true}, nil
+}
+
+func (f *fakeRaftClient) InstallSnapshot(
+	ctx context.Context,
+	in *proto.InstallSnapshotRequest,
+	opts ...grpc.CallOption,
+) (*proto.InstallSnapshotResponse, error) {
+	if f.installSnapshotErr != nil {
+		return nil, f.installSnapshotErr
+	}
+	return &proto.InstallSnapshotResponse{Term: in.Term}, nil
+}
+
+type immediateAfterClock struct {
+	*mockClock
+}
+
+func (c *immediateAfterClock) After(d time.Duration) <-chan time.Time {
+	ch := make(chan time.Time, 1)
+	ch <- c.Now()
+	return ch
+}
+
+func TestNetworkManager_CoverageComplete(t *testing.T) {
+	t.Run("formatGRPCError all branches", func(t *testing.T) {
+		testutil.AssertNil(t, formatGRPCError(nil))
+		testutil.AssertErrorIs(t, formatGRPCError(context.DeadlineExceeded), ErrTimeout)
+		testutil.AssertErrorIs(t, formatGRPCError(context.Canceled), context.Canceled)
+		rawErr := formatGRPCError(errors.New("plain error"))
+		testutil.AssertContains(t, rawErr.Error(), "network error")
+
+		testutil.AssertErrorIs(
+			t,
+			formatGRPCError(status.Error(codes.DeadlineExceeded, "deadline")),
+			ErrTimeout,
+		)
+		testutil.AssertErrorIs(
+			t,
+			formatGRPCError(status.Error(codes.Canceled, "canceled")),
+			context.Canceled,
+		)
+		unavailErr := formatGRPCError(status.Error(codes.Unavailable, "down"))
+		testutil.AssertContains(t, unavailErr.Error(), "peer unavailable")
+		testutil.AssertErrorIs(
+			t,
+			formatGRPCError(status.Error(codes.Aborted, "aborted")),
+			ErrShuttingDown,
+		)
+		internalErr := status.Error(codes.Internal, "internal")
+		testutil.AssertEqual(t, internalErr, formatGRPCError(internalErr))
+	})
+
+	t.Run("Start edge cases", func(t *testing.T) {
+		// 1. Start when already shut down
+		nm := mockNMForHandler(t)
+		nm.isShutdown.Store(true)
+		err := nm.Start()
+		testutil.AssertErrorIs(t, err, ErrShuttingDown)
+
+		// 2. Start with invalid localAddr
+		nm2 := mockNMForHandler(t)
+		nm2.localAddr = "invalid:addr:123:456"
+		err = nm2.Start()
+		testutil.AssertError(t, err)
+		testutil.AssertContains(t, err.Error(), "failed to listen")
+
+		// 3. Start with custom listener that errors on Accept
+		nm3, _, _, _ := setupNetworkManagerWithOpts(
+			t,
+			"node-accept-err",
+			"127.0.0.1:12345",
+			nil,
+			DefaultGRPCNetworkManagerOptions(),
+			newMockClock(),
+			NewNoOpMetrics(),
+		)
+		nm3.listener = newFakeListener(errors.New("custom accept error"), nil)
+		err = nm3.Start()
+		testutil.AssertNoError(t, err)
+		time.Sleep(20 * time.Millisecond)
+
+		// 4. Start timeout waiting for serverReady
+		timedOut := false
+		for range 50 {
+			nmTimeout, _, _, _ := setupNetworkManagerWithOpts(
+				t,
+				"node-timeout",
+				"127.0.0.1:12345",
+				nil,
+				DefaultGRPCNetworkManagerOptions(),
+				&immediateAfterClock{mockClock: newMockClock()},
+				NewNoOpMetrics(),
+			)
+			fl := newFakeListener(nil, nil)
+			nmTimeout.listener = fl
+			err = nmTimeout.Start()
+			_ = fl.Close()
+			if err != nil && strings.Contains(err.Error(), "timeout waiting for gRPC server") {
+				timedOut = true
+				break
+			}
+		}
+		testutil.AssertTrue(t, timedOut, "Expected Start timeout branch to be exercised")
+	})
+
+	t.Run("stopInternal listener and peer conn close errors", func(t *testing.T) {
+		nm, _, _, _ := setupNetworkManagerWithOpts(
+			t,
+			"node-stop-err",
+			"127.0.0.1:12345",
+			nil,
+			DefaultGRPCNetworkManagerOptions(),
+			newMockClock(),
+			NewNoOpMetrics(),
+		)
+		nm.listener = newFakeListener(nil, errors.New("listener close error"))
+
+		conn, err := grpc.NewClient(
+			"127.0.0.1:12345",
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		testutil.AssertNoError(t, err)
+		_ = conn.Close() // Closing once so the second Close in stopInternal returns an error
+
+		nm.peerClients["peer1"] = &peerConnection{
+			id:   "peer1",
+			addr: "127.0.0.1:12345",
+			conn: conn,
+		}
+
+		err = nm.Stop()
+		testutil.AssertNoError(t, err)
+	})
+
+	t.Run("SendAppendEntries non-heartbeat RPC failure and PeerStatus", func(t *testing.T) {
+		nm := mockNMForHandler(t)
+		nm.peers["peer1"] = PeerConfig{ID: "peer1", Address: "127.0.0.1:12345"}
+
+		// PeerStatus when peer is in config but not yet in peerClients
+		st, err := nm.PeerStatus("peer1")
+		testutil.AssertNoError(t, err)
+		testutil.AssertFalse(t, st.Connected)
+
+		conn, err := grpc.NewClient(
+			"127.0.0.1:12345",
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		testutil.AssertNoError(t, err)
+		defer func() { _ = conn.Close() }()
+
+		nm.peerClients["peer1"] = &peerConnection{
+			id:     "peer1",
+			addr:   "127.0.0.1:12345",
+			conn:   conn,
+			client: &fakeRaftClient{appendEntriesErr: status.Error(codes.Unavailable, "failed")},
+		}
+
+		_, err = nm.SendAppendEntries(context.Background(), "peer1", &types.AppendEntriesArgs{
+			Term:     1,
+			LeaderID: "leader1",
+			Entries:  []types.LogEntry{{Index: 1, Term: 1, Command: []byte("cmd")}},
+		})
+		testutil.AssertError(t, err)
+	})
+
+	t.Run("ResetConnection and connectToPeerLocked branches", func(t *testing.T) {
+		nm := mockNMForHandler(t)
+		nm.peers["peer-ok"] = PeerConfig{ID: "peer-ok", Address: "127.0.0.1:12345"}
+		nm.peers["peer-bad"] = PeerConfig{ID: "peer-bad", Address: "%zz"}
+
+		// 1. ResetConnection when peer does not exist in peerClients yet
+		err := nm.ResetConnection(context.Background(), "peer-ok")
+		testutil.AssertNoError(t, err)
+
+		// 2. ResetConnection when peer already exists with an active conn
+		err = nm.ResetConnection(context.Background(), "peer-ok")
+		testutil.AssertNoError(t, err)
+
+		// 3. connectToPeerLocked when client.conn != nil (direct call)
+		pc := nm.peerClients["peer-ok"]
+		err = nm.connectToPeerLocked(pc)
+		testutil.AssertNoError(t, err)
+		if pc.conn != nil {
+			_ = pc.conn.Close()
+		}
+
+		// 4. getOrCreatePeerClientLocked when grpc.NewClient fails on invalid URI
+		_, err = nm.getOrCreatePeerClientLocked(context.Background(), "peer-bad")
+		testutil.AssertError(t, err)
+		testutil.AssertContains(t, err.Error(), "failed to connect to peer")
+	})
+
+	t.Run("grpcServerHandler shutdown and error branches", func(t *testing.T) {
+		nm := mockNMForHandler(t)
+		rpcHandler := &mockRPCHandler{}
+		h := &grpcServerHandler{
+			nm:         nm,
+			rpcHandler: rpcHandler,
+			logger:     logger.NewNoOpLogger(),
+		}
+
+		// 1. Shutdown rejections for RequestVote, AppendEntries, InstallSnapshot
+		nm.isShutdown.Store(true)
+		_, err := h.RequestVote(context.Background(), &proto.RequestVoteRequest{CandidateId: "c1"})
+		testutil.AssertError(t, err)
+
+		_, err = h.AppendEntries(context.Background(), &proto.AppendEntriesRequest{LeaderId: "l1"})
+		testutil.AssertError(t, err)
+
+		_, err = h.InstallSnapshot(context.Background(), &proto.InstallSnapshotRequest{LeaderId: "l1"})
+		testutil.AssertError(t, err)
+
+		// 2. RequestVote handler errors: context.Canceled and plain non-status error
+		nm.isShutdown.Store(false)
+		rpcHandler.SetRequestVoteError(context.Canceled)
+		_, err = h.RequestVote(context.Background(), &proto.RequestVoteRequest{CandidateId: "c1"})
+		testutil.AssertError(t, err)
+
+		rpcHandler.SetRequestVoteError(errors.New("plain handler error"))
+		_, err = h.RequestVote(context.Background(), &proto.RequestVoteRequest{CandidateId: "c1"})
+		testutil.AssertError(t, err)
+	})
 }

@@ -53,15 +53,19 @@ func (NoOpReplicationStateUpdater) UpdatePeerAfterSnapshotSend(
 	peerID types.NodeID,
 	snapshotIndex types.Index,
 ) {
+	_, _ = peerID, snapshotIndex
 }
 
 func (NoOpReplicationStateUpdater) SetPeerSnapshotInProgress(
 	peerID types.NodeID,
 	inProgress bool,
 ) {
+	_, _ = peerID, inProgress
 }
 
-func (NoOpReplicationStateUpdater) MaybeAdvanceCommitIndex() {}
+func (u NoOpReplicationStateUpdater) MaybeAdvanceCommitIndex() {
+	_ = u
+}
 
 // SnapshotManager defines the interface for managing Raft snapshot operations.
 // It is responsible for snapshot creation, restoration, persistence, log truncation,

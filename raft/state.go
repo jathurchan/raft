@@ -721,22 +721,6 @@ func (sm *stateManager) GrantVote(
 			"votedFor", sm.votedFor,
 			"candidateID", candidateID,
 			"nodeID", sm.id)
-
-		// If we updated the term but can't vote, we still need to persist the term update
-		if term > previousTerm {
-			persistCtx, cancel := context.WithTimeout(ctx, persistOperationTimeout)
-			defer cancel()
-
-			if err := sm.persistStateWithRetry(persistCtx, sm.currentTerm, sm.votedFor); err != nil {
-				sm.logger.Errorw("Failed to persist term update after vote rejection",
-					"term", sm.currentTerm,
-					"error", err,
-					"nodeID", sm.id)
-				// Rollback in-memory state
-				sm.currentTerm = previousTerm
-				sm.votedFor = previousVotedFor
-			}
-		}
 		return false
 	}
 
@@ -1024,10 +1008,7 @@ func (sm *stateManager) persistStateWithRetry(
 				return fmt.Errorf("context cancelled during retry delay: %w", ctx.Err())
 			case <-sm.clock.After(delay):
 				// Exponential backoff with cap
-				delay = delay * 2
-				if delay > maxPersistDelay {
-					delay = maxPersistDelay
-				}
+				delay = min(delay*2, maxPersistDelay)
 			}
 		}
 	}

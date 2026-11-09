@@ -695,14 +695,14 @@ func (rm *replicationManager) sendHeartbeatsAndCountResponses(
 	successCount := 0
 	needed := rm.quorumSize - 1
 
-	for i := 0; i < len(peerIDs); i++ {
+	for i := range peerIDs {
 		select {
 		case success := <-responseCh:
 			if success {
 				successCount++
 			}
 			remaining := len(peerIDs) - i - 1
-			if successCount >= needed || successCount+remaining < needed {
+			if remaining > 0 && (successCount >= needed || successCount+remaining < needed) {
 				return successCount
 			}
 		case <-timeoutCtx.Done():

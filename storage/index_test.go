@@ -1287,6 +1287,33 @@ func TestIndexServiceEdgeCases(t *testing.T) {
 		err := is.VerifyConsistency(indexMap)
 		testutil.AssertNoError(t, err)
 	})
+
+	t.Run("Build and ReadInRange log file close errors", func(t *testing.T) {
+		is, mfs, mr := setupTestIndexService()
+		logPath := "test.log"
+		mfs.files[logPath] = []byte{0x01}
+		mfs.OpenFunc = func(name string) (file, error) {
+			f, err := mfs.defaultOpen(name)
+			if err != nil {
+				return nil, err
+			}
+			mf := f.(*mockFile)
+			mf.CloseFunc = func() error {
+				return errors.New("close error")
+			}
+			return mf, nil
+		}
+
+		mr.AddEntry(types.LogEntry{Term: 1, Index: 1, Command: []byte("cmd1")}, 10)
+		res, err := is.Build(logPath)
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, 1, len(res.IndexMap))
+
+		mr.AddEntryWithOffset(types.LogEntry{Term: 1, Index: 1, Command: []byte("cmd1")}, 10, 0)
+		entries, _, err := is.ReadInRange(context.Background(), logPath, res.IndexMap, 1, 2)
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, 1, len(entries))
+	})
 }
 
 func TestEstimateCapacity(t *testing.T) {

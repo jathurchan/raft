@@ -1445,11 +1445,11 @@ func TestMetricsEnabled(t *testing.T) {
 
 			deps.snapshotReader.readFunc = func(ctx context.Context) (types.SnapshotMetadata, []byte, error) {
 				return types.SnapshotMetadata{
-						LastIncludedIndex: 1,
-						LastIncludedTerm:  1,
-					}, []byte(
-						"snap-data",
-					), nil
+					LastIncludedIndex: 1,
+					LastIncludedTerm:  1,
+				}, []byte(
+					"snap-data",
+				), nil
 			}
 
 			deps.logRewriter.rewriteFunc = func(ctx context.Context, entries []types.LogEntry) ([]types.IndexOffsetPair, error) {
@@ -2846,5 +2846,242 @@ func TestGetEntriesViaScan(t *testing.T) {
 		testutil.AssertNoError(t, err)
 		testutil.AssertEqual(t, uint64(1), s.metrics.readOps.Load())
 		testutil.AssertEqual(t, uint64(1), s.metrics.readEntries.Load())
+	})
+}
+
+type cancelAfterFirstErrCtx struct {
+	context.Context
+	calls int
+}
+
+func (c *cancelAfterFirstErrCtx) Err() error {
+	c.calls++
+	if c.calls > 1 {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestAdditionalStorageCoverage(t *testing.T) {
+	t.Run("Initialize RemoveRecoveryMarker errors", func(t *testing.T) {
+		for _, removeErr := range []error{
+			errors.New("remove marker failed"),
+			fmt.Errorf("wrapped: %w", os.ErrNotExist),
+		} {
+			s, _ := newTestStorageBuilder(t).
+				WithDeps(func(deps *mockStorageDependencies) {
+					deps.recoverySvc.removeMarkerErr = removeErr
+				}).
+				Build()
+			err := s.initialize()
+			testutil.AssertNoError(t, err)
+		}
+	})
+
+	t.Run("EnsureMetadataLocked and LoadMetadataLocked validation error", func(t *testing.T) {
+		s, _ := newTestStorageBuilder(t).
+			WithDeps(func(deps *mockStorageDependencies) {
+				deps.metadataSvc.LoadMetadataFunc = func(path string) (logMetadata, error) {
+					return logMetadata{FirstIndex: 1, LastIndex: 2}, nil
+				}
+				deps.metadataSvc.ValidateMetadataRangeFunc = func(first, last types.Index) error {
+					return fmt.Errorf("wrapped not exist: %w", os.ErrNotExist)
+				}
+				deps.metadataSvc.SaveMetadataFunc = func(path string, meta logMetadata, atomic bool) error {
+					return nil
+				}
+			}).
+			Build()
+
+		err := s.ensureMetadataLocked()
+		testutil.AssertNoError(t, err)
+	})
+
+	t.Run("LoadState UnmarshalState error", func(t *testing.T) {
+		opts := DefaultFileStorageOptions()
+		opts.Features.EnableMetrics = true
+		s, _ := newTestStorageBuilder(t).
+			WithOptions(opts).
+			WithDeps(func(deps *mockStorageDependencies) {
+				deps.fs.ReadFileFunc = func(name string) ([]byte, error) {
+					return []byte("invalid-json"), nil
+				}
+				deps.serializer.unmarshalStateFunc = func(data []byte) (types.PersistentState, error) {
+					return types.PersistentState{}, errors.New("decode failed")
+				}
+			}).
+			Build()
+
+		_, err := s.LoadState(context.Background())
+		testutil.AssertError(t, err)
+		testutil.AssertErrorIs(t, err, ErrCorruptedState)
+	})
+
+	t.Run("SaveState WriteMaybeAtomic error", func(t *testing.T) {
+		opts := DefaultFileStorageOptions()
+		opts.Features.EnableMetrics = true
+		s, _ := newTestStorageBuilder(t).
+			WithOptions(opts).
+			WithDeps(func(deps *mockStorageDependencies) {
+				deps.serializer.marshalStateFunc = func(state types.PersistentState) ([]byte, error) {
+					return []byte("state"), nil
+				}
+				deps.fs.WriteMaybeAtomicFunc = func(path string, data []byte, perm os.FileMode, atomic bool) error {
+					return errors.New("write failed")
+				}
+			}).
+			Build()
+
+		err := s.SaveState(context.Background(), types.PersistentState{CurrentTerm: 1})
+		testutil.AssertError(t, err)
+		testutil.AssertErrorIs(t, err, ErrStorageIO)
+	})
+
+	t.Run("getEntriesViaScan and getEntryViaScan close error", func(t *testing.T) {
+		s, deps := newTestStorageBuilder(t).
+			WithDeps(func(deps *mockStorageDependencies) {
+				deps.fs.OpenFunc = func(name string) (file, error) {
+					return &mockFile{
+						CloseFunc: func() error {
+							return errors.New("close failed")
+						},
+					}, nil
+				}
+				deps.logReader.ScanRangeFunc = func(ctx context.Context, f file, start, end types.Index) ([]types.LogEntry, error) {
+					return []types.LogEntry{{Index: 1}}, nil
+				}
+			}).
+			Build()
+
+		entries, err := s.getEntriesViaScan(context.Background(), 1, 2)
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, 1, len(entries))
+
+		deps.logReader.AddEntry(types.LogEntry{Index: 1, Term: 1}, 10)
+		entry, err := s.getEntryViaScan(context.Background(), 1)
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, types.Index(1), entry.Index)
+	})
+
+	t.Run("GetLogEntry context canceled inside DoRead and index map error", func(t *testing.T) {
+		opts := DefaultFileStorageOptions()
+		opts.Features.EnableLockTimeout = false
+		s, deps := newTestStorageBuilder(t).WithOptions(opts).Build()
+		ctx := &cancelAfterFirstErrCtx{Context: context.Background()}
+		_, err := s.GetLogEntry(ctx, 1)
+		testutil.AssertErrorIs(t, err, context.Canceled)
+
+		s.options.Features.EnableIndexMap = true
+		deps.indexSvc.ReadInRangeFunc = func(ctx context.Context, logPath string, indexMap []types.IndexOffsetPair, start, end types.Index) ([]types.LogEntry, int64, error) {
+			return nil, 0, errors.New("read in range failed")
+		}
+		_, err = s.GetLogEntry(context.Background(), 1)
+		testutil.AssertError(t, err)
+		testutil.AssertContains(t, err.Error(), "index map lookup failed")
+	})
+
+	t.Run("TruncateLogPrefix and truncateLogRange branches", func(t *testing.T) {
+		opts := DefaultFileStorageOptions()
+		opts.Features.EnableMetrics = true
+		opts.Features.EnableIndexMap = true
+
+		s, deps := newTestStorageBuilder(t).
+			WithOptions(opts).
+			WithIndexBounds(1, 5).
+			Build()
+
+		// 1. truncateLogRange with canceled context
+		cctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := s.truncateLogRange(cctx, 1, 2)
+		testutil.AssertErrorIs(t, err, context.Canceled)
+
+		// 2. truncateLogRange where getLogEntriesUnlocked fails (invalid range keepStart > keepEnd)
+		err = s.truncateLogRange(context.Background(), 10, 12)
+		testutil.AssertError(t, err)
+		testutil.AssertContains(t, err.Error(), "failed to load log entries for truncation")
+
+		// 3. TruncateLogPrefix where truncateLogRange fails via logRewriter.Rewrite error
+		deps.indexSvc.ReadInRangeFunc = func(ctx context.Context, logPath string, indexMap []types.IndexOffsetPair, start, end types.Index) ([]types.LogEntry, int64, error) {
+			return []types.LogEntry{{Index: 3, Term: 1}}, 10, nil
+		}
+		deps.logRewriter.rewriteFunc = func(ctx context.Context, entries []types.LogEntry) ([]types.IndexOffsetPair, error) {
+			return nil, errors.New("rewrite failed")
+		}
+		err = s.TruncateLogPrefix(context.Background(), 3)
+		testutil.AssertError(t, err)
+		testutil.AssertContains(t, err.Error(), "failed to rewrite log file")
+
+		// 4. truncateLogRange where saveMetadataLocked fails
+		deps.logRewriter.rewriteFunc = nil
+		deps.metadataSvc.SaveMetadataFunc = func(path string, metadata logMetadata, useAtomicWrite bool) error {
+			return errors.New("save metadata failed")
+		}
+		err = s.truncateLogRange(context.Background(), 3, 6)
+		testutil.AssertError(t, err)
+		testutil.AssertContains(t, err.Error(), "truncate succeeded but failed to save metadata")
+
+		// 5. truncateLogRange success with metrics and space saved (both non-empty and empty)
+		deps.metadataSvc.SaveMetadataFunc = nil
+		statCalls := 0
+		deps.fs.StatFunc = func(name string) (os.FileInfo, error) {
+			statCalls++
+			if statCalls == 1 {
+				return &mockFileInfo{sizeVal: 1000}, nil
+			}
+			return &mockFileInfo{sizeVal: 200}, nil
+		}
+		err = s.truncateLogRange(context.Background(), 3, 6)
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, types.Index(3), s.FirstLogIndex())
+
+		// Empty entries branch in truncateLogRange
+		err = s.truncateLogRange(context.Background(), 0, 0)
+		testutil.AssertNoError(t, err)
+		testutil.AssertEqual(t, types.Index(0), s.FirstLogIndex())
+	})
+
+	t.Run("SaveSnapshot remove marker error and maybeTruncateAfterSnapshot branches", func(t *testing.T) {
+		opts := DefaultFileStorageOptions()
+		opts.AutoTruncateOnSnapshot = false
+
+		s, deps := newTestStorageBuilder(t).
+			WithOptions(opts).
+			WithIndexBounds(1, 5).
+			WithDeps(func(deps *mockStorageDependencies) {
+				deps.recoverySvc.removeSnapshotMarkerErr = errors.New("remove snapshot marker failed")
+			}).
+			Build()
+
+		meta := types.SnapshotMetadata{LastIncludedIndex: 10, LastIncludedTerm: 1}
+		err := s.SaveSnapshot(context.Background(), meta, []byte("snap"))
+		testutil.AssertNoError(t, err)
+
+		// Now test synchronous truncation failure in maybeTruncateAfterSnapshot
+		s.options.AutoTruncateOnSnapshot = true
+		s.options.Features.EnableAsyncTruncation = false
+		// LastIncludedIndex+1 = 11 > last+1 (6), so TruncateLogPrefix returns ErrIndexOutOfRange
+		s.maybeTruncateAfterSnapshot(context.Background(), meta)
+
+		// Also test synchronous truncation success in maybeTruncateAfterSnapshot
+		deps.indexSvc.ReadInRangeFunc = func(ctx context.Context, logPath string, indexMap []types.IndexOffsetPair, start, end types.Index) ([]types.LogEntry, int64, error) {
+			return []types.LogEntry{{Index: 3, Term: 1}}, 10, nil
+		}
+		s.maybeTruncateAfterSnapshot(context.Background(), types.SnapshotMetadata{LastIncludedIndex: 2, LastIncludedTerm: 1})
+	})
+
+	t.Run("Metrics helper edge cases", func(t *testing.T) {
+		opts := DefaultFileStorageOptions()
+		opts.Features.EnableMetrics = false
+		s, _ := newTestStorageBuilder(t).WithOptions(opts).Build()
+
+		s.updateLogSizeMetricUnlocked()
+		s.updateMetadataSizeMetricUnlocked()
+		s.updateIndexMapSizeMetricUnlocked()
+
+		s.options.Features.EnableMetrics = true
+		var errCounter atomic.Uint64
+		s.trackOperationLatency("unknown_op", time.Now(), &errCounter, errors.New("op err"))
+		testutil.AssertEqual(t, uint64(1), errCounter.Load())
 	})
 }
