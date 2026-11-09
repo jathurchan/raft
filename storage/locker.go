@@ -130,6 +130,11 @@ func (ol *defaultRWOperationLocker) withTimeout(
 			"timeout", ol.lockTimeout,
 			"contextErr", ctx.Err(),
 		)
+		// The acquire is still pending, so release the lock once it succeeds.
+		go func() {
+			<-acquired
+			unlockFn()
+		}()
 		return fmt.Errorf("lock acquisition timeout for %s operation: %w", opType, lockCtx.Err())
 	}
 }
