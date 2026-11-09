@@ -171,6 +171,32 @@ func TestRaft_RaftNode_Start(t *testing.T) {
 			t.Errorf("Expected shutdown error, got %v", err)
 		}
 	})
+
+	t.Run("start when network manager is nil", func(t *testing.T) {
+		r, _, _, _, _, _, _, _ := createTestRaftNode(t)
+		r.networkMgr = nil
+
+		err := r.Start()
+		if err == nil || !strings.Contains(err.Error(), "network manager must be set") {
+			t.Errorf("Expected network manager must be set error, got %v", err)
+		}
+	})
+
+	t.Run("set network manager once and twice", func(t *testing.T) {
+		r, _, _, _, _, _, networkMgr, _ := createTestRaftNode(t)
+		r.networkMgr = nil
+
+		r.SetNetworkManager(networkMgr)
+		if r.networkMgr != networkMgr {
+			t.Errorf("Expected networkMgr to be set")
+		}
+
+		otherMgr := newMockNetworkManager()
+		r.SetNetworkManager(otherMgr)
+		if r.networkMgr != networkMgr {
+			t.Errorf("Expected second SetNetworkManager call to be ignored")
+		}
+	})
 }
 
 func TestRaft_RaftNode_Stop(t *testing.T) {
@@ -455,6 +481,22 @@ func TestRaftNode_Propose(t *testing.T) {
 		}
 	})
 
+	t.Run("propose generic error", func(t *testing.T) {
+		r, _, _, _, _, replicationMgr, _, _ := createTestRaftNode(t)
+
+		replicationMgr.proposeFunc = func(ctx context.Context, command []byte) (types.Index, types.Term, bool, error) {
+			return 0, 0, true, errors.New("storage failure")
+		}
+
+		_, _, isLeader, err := r.Propose(context.Background(), []byte("cmd"))
+		if err == nil || !strings.Contains(err.Error(), "storage failure") {
+			t.Errorf("Expected storage failure error, got %v", err)
+		}
+		if !isLeader {
+			t.Errorf("Expected isLeader true, got false")
+		}
+	})
+
 	t.Run("propose when shutdown", func(t *testing.T) {
 		r, _, _, _, _, _, _, _ := createTestRaftNode(t)
 
@@ -509,6 +551,19 @@ func TestRaft_RaftNode_ReadIndex(t *testing.T) {
 		}
 		if !errors.Is(err, ErrNotLeader) {
 			t.Errorf("Expected ErrNotLeader, got %v", err)
+		}
+	})
+
+	t.Run("read index generic error", func(t *testing.T) {
+		r, _, _, _, _, replicationMgr, _, _ := createTestRaftNode(t)
+
+		replicationMgr.verifyLeadershipAndGetCommitIndexFunc = func(ctx context.Context) (types.Index, error) {
+			return 0, errors.New("quorum timeout")
+		}
+
+		_, err := r.ReadIndex(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "quorum timeout") {
+			t.Errorf("Expected quorum timeout error, got %v", err)
 		}
 	})
 
@@ -775,6 +830,20 @@ func TestRaft_RaftNode_RPCHandlers(t *testing.T) {
 		}
 	})
 
+	t.Run("request vote denied", func(t *testing.T) {
+		r, _, _, electionMgr, _, _, _, _ := createTestRaftNode(t)
+		electionMgr.handleRequestVoteResult = &types.RequestVoteReply{Term: 5, VoteGranted: false}
+
+		args := &types.RequestVoteArgs{Term: 5, CandidateID: "node2"}
+		reply, err := r.RequestVote(context.Background(), args)
+		if err != nil {
+			t.Errorf("Expected no error, got %v", err)
+		}
+		if reply.VoteGranted {
+			t.Errorf("Expected VoteGranted false, got true")
+		}
+	})
+
 	t.Run("request vote with error", func(t *testing.T) {
 		r, _, _, electionMgr, _, _, _, _ := createTestRaftNode(t)
 		expectedErr := errors.New("vote error")
@@ -869,6 +938,21 @@ func TestRaft_RaftNode_RPCHandlers(t *testing.T) {
 		}
 		if reply.Term != stateMgr.currentTerm {
 			t.Errorf("Expected term %d, got %d", stateMgr.currentTerm, reply.Term)
+		}
+		if reply.Success {
+			t.Errorf("Expected Success false, got true")
+		}
+	})
+
+	t.Run("append entries rejected", func(t *testing.T) {
+		r, stateMgr, _, _, _, replicationMgr, _, _ := createTestRaftNode(t)
+		replicationMgr.handleAppendEntriesResult = &types.AppendEntriesReply{Term: 5, Success: false}
+		stateMgr.currentTerm = 5
+
+		args := &types.AppendEntriesArgs{Term: 4, LeaderID: "node2"}
+		reply, err := r.AppendEntries(context.Background(), args)
+		if err != nil {
+			t.Errorf("Expected no error, got %v", err)
 		}
 		if reply.Success {
 			t.Errorf("Expected Success false, got true")
@@ -1034,6 +1118,101 @@ func TestRaft_RaftNode_ApplyCommittedEntries(t *testing.T) {
 		case <-time.After(100 * time.Millisecond):
 			t.Errorf("Apply loop did not stop in time")
 		}
+	})
+
+	t.Run("stop apply loop via global stopCh", func(t *testing.T) {
+		r, _, _, _, _, _, _, _ := createTestRaftNode(t)
+
+		go r.runApplyLoop()
+		close(r.stopCh)
+
+		select {
+		case <-r.applyLoopDoneCh:
+		case <-time.After(100 * time.Millisecond):
+			t.Errorf("Apply loop did not stop on stopCh")
+		}
+	})
+
+	t.Run("stop apply loop with pending notification drain", func(t *testing.T) {
+		for range 50 {
+			r, _, _, _, _, _, _, _ := createTestRaftNode(t)
+			close(r.applyLoopStopCh)
+			r.applyNotifyCh <- struct{}{}
+			r.runApplyLoop()
+		}
+	})
+
+	t.Run("fetchEntries generic error and empty batch", func(t *testing.T) {
+		r, _, logMgr, _, _, _, _, _ := createTestRaftNode(t)
+
+		logMgr.getEntriesFunc = func(ctx context.Context, start, end types.Index) ([]types.LogEntry, error) {
+			return nil, errors.New("disk read error")
+		}
+		_, err := r.fetchEntries(1, 2)
+		if err == nil || !strings.Contains(err.Error(), "disk read error") {
+			t.Errorf("Expected disk read error, got %v", err)
+		}
+
+		logMgr.getEntriesFunc = func(ctx context.Context, start, end types.Index) ([]types.LogEntry, error) {
+			return nil, nil
+		}
+		_, err = r.fetchEntries(1, 2)
+		if err == nil || !strings.Contains(err.Error(), "empty entry batch") {
+			t.Errorf("Expected empty entry batch error, got %v", err)
+		}
+	})
+
+	t.Run("applyCommittedEntries with fetch error", func(t *testing.T) {
+		r, stateMgr, logMgr, _, _, _, _, _ := createTestRaftNode(t)
+		stateMgr.commitIndex = 2
+		stateMgr.lastApplied = 0
+		logMgr.getEntriesFunc = func(ctx context.Context, start, end types.Index) ([]types.LogEntry, error) {
+			return nil, errors.New("read failed")
+		}
+		r.applyCommittedEntries()
+	})
+
+	t.Run("determineApplyRange batch limit cap", func(t *testing.T) {
+		r, _, _, _, _, _, _, _ := createTestRaftNode(t)
+		nextIdx, endIdx := r.determineApplyRange(0, 500)
+		if nextIdx != 1 || endIdx != 1+types.Index(DefaultMaxApplyBatchSize) {
+			t.Errorf("Unexpected range: %d..%d", nextIdx, endIdx)
+		}
+	})
+
+	t.Run("applyEntries noop command, error, and shutdown", func(t *testing.T) {
+		r, stateMgr, _, _, _, _, _, applier := createTestRaftNode(t)
+		stateMgr.commitIndex = 5
+		applier.applyFunc = func(ctx context.Context, index types.Index, command []byte) (any, error) {
+			return nil, errors.New("apply failed")
+		}
+
+		entries := []types.LogEntry{
+			{Index: 1, Term: 1, Command: nil},
+			{Index: 2, Term: 1, Command: []byte("cmd2")},
+		}
+		r.applyEntries(entries)
+		if stateMgr.lastApplied != 2 {
+			t.Errorf("Expected lastApplied 2, got %d", stateMgr.lastApplied)
+		}
+
+		r.isShutdown.Store(true)
+		r.applyEntries([]types.LogEntry{{Index: 3, Term: 1, Command: []byte("cmd3")}})
+		if stateMgr.lastApplied != 2 {
+			t.Errorf("Expected lastApplied to remain 2 on shutdown, got %d", stateMgr.lastApplied)
+		}
+	})
+
+	t.Run("sendApplyMsg full channel and stopCh", func(t *testing.T) {
+		r, _, _, _, _, _, _, _ := createTestRaftNode(t)
+		r.applyCh = make(chan types.ApplyMsg) // unbuffered, so full immediately
+
+		// Full channel -> default branch
+		r.sendApplyMsg(types.ApplyMsg{CommandIndex: 1})
+
+		// Closed stopCh -> stopCh branch
+		close(r.stopCh)
+		r.sendApplyMsg(types.ApplyMsg{CommandIndex: 2})
 	})
 }
 

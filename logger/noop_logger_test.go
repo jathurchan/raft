@@ -30,4 +30,23 @@ func TestNoOpLogger(t *testing.T) {
 	// Test chaining of context enrichment methods
 	chainedLogger := logger.WithNodeID("1").WithTerm(5).WithComponent("test").With("key", "value")
 	chainedLogger.Infow("chained message")
+
+	// Test custom function callbacks on NoOpLogger
+	noop := logger.(*NoOpLogger)
+	var called int
+	noop.DebugwFunc = func(msg string, kvs ...any) { called++ }
+	noop.InfowFunc = func(msg string, kvs ...any) { called++ }
+	noop.WarnwFunc = func(msg string, kvs ...any) { called++ }
+	noop.ErrorwFunc = func(msg string, kvs ...any) { called++ }
+	noop.FatalwFunc = func(msg string, kvs ...any) { called++ }
+
+	noop.Debugw("debug")
+	noop.Infow("info")
+	noop.Warnw("warn")
+	noop.Errorw("error")
+	noop.Fatalw("fatal")
+
+	if called != 5 {
+		t.Errorf("Expected 5 callback invocations, got %d", called)
+	}
 }

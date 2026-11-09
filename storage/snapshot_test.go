@@ -1028,3 +1028,43 @@ func TestFileStorage_SnapshotRoundTripOnDisk(t *testing.T) {
 		})
 	}
 }
+
+func TestSnapshotFileCloseErrors(t *testing.T) {
+	log := &logger.NoOpLogger{}
+	fs := newMockFileSystem()
+	serializer := newJsonSerializer()
+	dir := "/test/snapshot_close_err"
+	fs.dir = dir
+
+	fs.OpenFunc = func(name string) (file, error) {
+		f, err := fs.defaultOpen(name)
+		if err != nil {
+			return nil, err
+		}
+		mf := f.(*mockFile)
+		mf.CloseFunc = func() error {
+			return errors.New("close error")
+		}
+		return mf, nil
+	}
+
+	writer := newSnapshotWriter(fs, serializer, log, dir, nil, true, 4)
+	meta := types.SnapshotMetadata{LastIncludedIndex: 10, LastIncludedTerm: 2}
+	data := []byte("0123456789")
+
+	err := writer.Write(context.Background(), meta, data)
+	testutil.AssertNoError(t, err)
+
+	reader := &defaultSnapshotReader{
+		fs:              fs,
+		serializer:      serializer,
+		logger:          log,
+		dir:             dir,
+		enableChunkedIO: true,
+		chunkSize:       4,
+	}
+	gotMeta, gotData, err := reader.Read(context.Background())
+	testutil.AssertNoError(t, err)
+	testutil.AssertEqual(t, meta, gotMeta)
+	testutil.AssertEqual(t, data, gotData)
+}
