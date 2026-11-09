@@ -108,6 +108,7 @@ type electionManager struct {
 
 	electionElapsed  int // Ticks elapsed since last heartbeat
 	randomizedPeriod int // Randomized timeout threshold for current cycle
+	ticksSinceLeader int // Ticks since the last message from a leader
 
 	voteMu        sync.RWMutex          // To isolate vote tracking from mu and reduce contention
 	votesReceived map[types.NodeID]bool // Tracks which peers have granted votes
@@ -367,6 +368,10 @@ func (em *electionManager) ResetTimerOnHeartbeat() {
 
 	em.resetElectionTimeoutPeriod()
 
+	em.timerMu.Lock()
+	em.ticksSinceLeader = 0
+	em.timerMu.Unlock()
+
 	em.logger.Debugw("Election timeout period reset on heartbeat", "nodeID", em.id)
 }
 
@@ -402,6 +407,7 @@ func (em *electionManager) Tick(ctx context.Context) {
 		em.timerMu.Lock()
 		defer em.timerMu.Unlock()
 
+		em.ticksSinceLeader++
 		em.electionElapsed++
 		return em.electionElapsed >= em.randomizedPeriod
 	}()
@@ -1052,10 +1058,10 @@ func (em *electionManager) handlePreVote(args *types.RequestVoteArgs) *types.Req
 
 	if leaderID != unknownNodeID {
 		em.timerMu.Lock()
-		elapsed := em.electionElapsed
+		silentTicks := em.ticksSinceLeader
 		em.timerMu.Unlock()
 
-		if elapsed < em.electionTickCount {
+		if silentTicks < em.electionTickCount {
 			return reply
 		}
 	}
@@ -1113,8 +1119,11 @@ func (em *electionManager) HandleRequestVote(
 			"newTerm", args.Term,
 			"previousTerm", termBeforeCheck,
 			"nodeID", em.id)
-		// reset the election state when stepping down
-		em.resetElectionState("higher term in vote request")
+		// Abandon any election in progress, but leave the timer running: only a granted
+		// vote may reset it, or a candidate that cannot win would block those that can.
+		em.electionState.Store(int32(ElectionStateIdle))
+		em.electionInFlight.Store(false)
+		em.resetVoteTracking(0)
 	}
 
 	currentTerm, currentRole, _ := em.stateMgr.GetState()
@@ -1179,7 +1188,7 @@ func (em *electionManager) HandleRequestVote(
 	}
 
 	reply.VoteGranted = true
-	em.ResetTimerOnHeartbeat()
+	em.resetElectionTimeoutPeriod()
 
 	return reply, nil
 }
