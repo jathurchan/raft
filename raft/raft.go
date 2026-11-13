@@ -757,3 +757,102 @@ func (r *raftNode) handleLeaderChanges() {
 		}
 	}
 }
+
+// TransferLeadership transfers leadership from the current leader to the target peer.
+func (r *raftNode) TransferLeadership(ctx context.Context, target types.NodeID) error {
+	if r.isShutdown.Load() {
+		return ErrShuttingDown
+	}
+	if target == "" {
+		return errors.New("target node ID cannot be empty")
+	}
+
+	status := r.Status()
+	if status.Role != types.RoleLeader {
+		return ErrNotLeader
+	}
+	if target == r.id {
+		return nil
+	}
+	if _, ok := status.Replication[target]; !ok {
+		return fmt.Errorf("unknown target peer: %s", target)
+	}
+
+	// Wait until target's log is caught up to our lastLogIndex.
+	for {
+		st := r.Status()
+		if st.Role != types.RoleLeader {
+			return ErrNotLeader
+		}
+		peerState, ok := st.Replication[target]
+		if ok && peerState.MatchIndex >= st.LastLogIndex {
+			break
+		}
+		r.replicationMgr.Tick(ctx)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-r.stopCh:
+			return ErrShuttingDown
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	tnSender, ok := r.networkMgr.(TimeoutNowSender)
+	if !ok {
+		return errors.New("network manager does not support TimeoutNow")
+	}
+
+	term, isLeader := r.GetState()
+	if !isLeader {
+		return ErrNotLeader
+	}
+
+	reply, err := tnSender.SendTimeoutNow(ctx, target, &TimeoutNowArgs{
+		Term:     term,
+		LeaderID: r.id,
+	})
+	if err != nil {
+		return err
+	}
+	if !reply.Success {
+		return fmt.Errorf("leadership transfer rejected by %s (term %d)", target, reply.Term)
+	}
+
+	// Wait for this node to step down or recognize the new leader.
+	for {
+		_, stillLeader := r.GetState()
+		if !stillLeader {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-r.stopCh:
+			return ErrShuttingDown
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TimeoutNow handles an incoming TimeoutNow RPC by immediately starting an election.
+func (r *raftNode) TimeoutNow(ctx context.Context, args *TimeoutNowArgs) (*TimeoutNowReply, error) {
+	if r.isShutdown.Load() {
+		return nil, ErrShuttingDown
+	}
+
+	currentTerm, role, _ := r.stateMgr.GetState()
+	if args.Term < currentTerm {
+		return &TimeoutNowReply{Term: currentTerm, Success: false}, nil
+	}
+
+	if args.Term > currentTerm || role != types.RoleFollower {
+		r.stateMgr.BecomeFollower(ctx, args.Term, args.LeaderID)
+	}
+
+	if ie, ok := r.electionMgr.(interface{ StartImmediateElection(context.Context) }); ok {
+		go ie.StartImmediateElection(context.Background())
+	}
+
+	return &TimeoutNowReply{Term: args.Term, Success: true}, nil
+}

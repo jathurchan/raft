@@ -78,7 +78,11 @@ type gRPCNetworkManager struct {
 
 	id         types.NodeID // ID of the local node
 	localAddr  string       // Address the local gRPC server listens on
-	rpcHandler RPCHandler   // Handler for incoming Raft RPCs
+	rpcHandler RPCHandler   // Handler for incoming Raft RPCs (single-group mode)
+
+	multiGroup    bool
+	groupMu       sync.RWMutex
+	groupHandlers map[string]RPCHandler
 
 	logger  logger.Logger
 	metrics Metrics
@@ -183,14 +187,55 @@ func NewGRPCNetworkManager(
 	clock Clock,
 	opts GRPCNetworkManagerOptions,
 ) (*gRPCNetworkManager, error) {
+	if rpcHandler == nil {
+		return nil, errors.New("RPC handler cannot be nil")
+	}
+	return newGRPCNetworkManagerInternal(id, addr, peers, rpcHandler, false, isShutdown, logger, metrics, clock, opts)
+}
+
+// MultiGroupNetworkManager multiplexes multiple Raft groups over a single gRPC server
+// and a shared pool of peer gRPC connections.
+type MultiGroupNetworkManager struct {
+	*gRPCNetworkManager
+}
+
+// NewMultiGroupGRPCNetworkManager creates a new MultiGroupNetworkManager that listens on a single
+// gRPC port, shares a single grpc.ClientConn pool per peer, and demultiplexes incoming RPCs
+// by group_id.
+func NewMultiGroupGRPCNetworkManager(
+	id types.NodeID,
+	addr string,
+	peers map[types.NodeID]PeerConfig,
+	isShutdown *atomic.Bool,
+	logger logger.Logger,
+	metrics Metrics,
+	clock Clock,
+	opts GRPCNetworkManagerOptions,
+) (*MultiGroupNetworkManager, error) {
+	nm, err := newGRPCNetworkManagerInternal(id, addr, peers, nil, true, isShutdown, logger, metrics, clock, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &MultiGroupNetworkManager{gRPCNetworkManager: nm}, nil
+}
+
+func newGRPCNetworkManagerInternal(
+	id types.NodeID,
+	addr string,
+	peers map[types.NodeID]PeerConfig,
+	rpcHandler RPCHandler,
+	multiGroup bool,
+	isShutdown *atomic.Bool,
+	logger logger.Logger,
+	metrics Metrics,
+	clock Clock,
+	opts GRPCNetworkManagerOptions,
+) (*gRPCNetworkManager, error) {
 	if id == "" {
 		return nil, errors.New("node ID cannot be empty")
 	}
 	if addr == "" {
 		return nil, errors.New("local address cannot be empty")
-	}
-	if rpcHandler == nil {
-		return nil, errors.New("RPC handler cannot be nil")
 	}
 	if isShutdown == nil {
 		return nil, errors.New("shutdown flag cannot be nil")
@@ -275,18 +320,20 @@ func NewGRPCNetworkManager(
 	)
 
 	nm := &gRPCNetworkManager{
-		id:          id,
-		localAddr:   addr,
-		rpcHandler:  rpcHandler,
-		isShutdown:  isShutdown,
-		logger:      logger.WithComponent("network"),
-		metrics:     metrics,
-		clock:       clock,
-		opts:        opts,
-		peers:       peers,
-		peerClients: make(map[types.NodeID]*peerConnection),
-		server:      server,
-		serverReady: make(chan struct{}),
+		id:            id,
+		localAddr:     addr,
+		rpcHandler:    rpcHandler,
+		multiGroup:    multiGroup,
+		groupHandlers: make(map[string]RPCHandler),
+		isShutdown:    isShutdown,
+		logger:        logger.WithComponent("network"),
+		metrics:       metrics,
+		clock:         clock,
+		opts:          opts,
+		peers:         peers,
+		peerClients:   make(map[types.NodeID]*peerConnection),
+		server:        server,
+		serverReady:   make(chan struct{}),
 	}
 
 	proto.RegisterRaftServer(server, &grpcServerHandler{
@@ -295,8 +342,96 @@ func NewGRPCNetworkManager(
 		logger:     logger.WithComponent("grpc-server"),
 	})
 
-	nm.logger.Infow("gRPC Network Manager created", "id", id, "address", addr, "options", opts)
+	nm.logger.Infow("gRPC Network Manager created", "id", id, "address", addr, "multi_group", multiGroup, "options", opts)
 	return nm, nil
+}
+
+// RegisterGroup registers an RPCHandler (such as a raft.Raft instance) for the given groupID.
+func (nm *gRPCNetworkManager) RegisterGroup(groupID string, handler RPCHandler) error {
+	if groupID == "" {
+		return errors.New("group ID cannot be empty")
+	}
+	if handler == nil {
+		return errors.New("RPC handler cannot be nil")
+	}
+
+	nm.groupMu.Lock()
+	defer nm.groupMu.Unlock()
+
+	if _, exists := nm.groupHandlers[groupID]; exists {
+		return fmt.Errorf("group %q is already registered", groupID)
+	}
+	nm.groupHandlers[groupID] = handler
+	return nil
+}
+
+// UnregisterGroup removes the RPCHandler for the given groupID.
+func (nm *gRPCNetworkManager) UnregisterGroup(groupID string) {
+	nm.groupMu.Lock()
+	defer nm.groupMu.Unlock()
+	delete(nm.groupHandlers, groupID)
+}
+
+// ForGroup returns a NetworkManager adapter bound to groupID.
+// Outgoing RPCs sent through the adapter are tagged with groupID, while Start() and Stop()
+// are no-ops so individual Raft groups do not shut down the shared transport.
+func (nm *gRPCNetworkManager) ForGroup(groupID string) NetworkManager {
+	return &groupNetworkManager{
+		parent:  nm,
+		groupID: groupID,
+	}
+}
+
+type groupNetworkManager struct {
+	parent  *gRPCNetworkManager
+	groupID string
+}
+
+func (g *groupNetworkManager) Start() error { return nil }
+func (g *groupNetworkManager) Stop() error  { return nil }
+
+func (g *groupNetworkManager) SendRequestVote(
+	ctx context.Context,
+	target types.NodeID,
+	args *types.RequestVoteArgs,
+) (*types.RequestVoteReply, error) {
+	return g.parent.sendRequestVote(ctx, target, g.groupID, args)
+}
+
+func (g *groupNetworkManager) SendAppendEntries(
+	ctx context.Context,
+	target types.NodeID,
+	args *types.AppendEntriesArgs,
+) (*types.AppendEntriesReply, error) {
+	return g.parent.sendAppendEntries(ctx, target, g.groupID, args)
+}
+
+func (g *groupNetworkManager) SendInstallSnapshot(
+	ctx context.Context,
+	target types.NodeID,
+	args *types.InstallSnapshotArgs,
+) (*types.InstallSnapshotReply, error) {
+	return g.parent.sendInstallSnapshot(ctx, target, g.groupID, args)
+}
+
+func (g *groupNetworkManager) SendTimeoutNow(
+	ctx context.Context,
+	target types.NodeID,
+	args *TimeoutNowArgs,
+) (*TimeoutNowReply, error) {
+	return g.parent.sendTimeoutNow(ctx, target, g.groupID, args)
+}
+
+func (g *groupNetworkManager) PeerStatus(peer types.NodeID) (types.PeerConnectionStatus, error) {
+	return g.parent.PeerStatus(peer)
+}
+
+func (g *groupNetworkManager) LocalAddr() string {
+	return g.parent.LocalAddr()
+}
+
+func (g *groupNetworkManager) ResetConnection(ctx context.Context, peerID types.NodeID) error {
+	return g.parent.ResetConnection(ctx, peerID)
 }
 
 // Start initializes the network manager by starting its local gRPC server.
@@ -440,6 +575,15 @@ func (nm *gRPCNetworkManager) SendRequestVote(
 	target types.NodeID,
 	args *types.RequestVoteArgs,
 ) (*types.RequestVoteReply, error) {
+	return nm.sendRequestVote(ctx, target, "", args)
+}
+
+func (nm *gRPCNetworkManager) sendRequestVote(
+	ctx context.Context,
+	target types.NodeID,
+	groupID string,
+	args *types.RequestVoteArgs,
+) (*types.RequestVoteReply, error) {
 	if nm.isShutdown.Load() {
 		return nil, ErrShuttingDown
 	}
@@ -459,6 +603,7 @@ func (nm *gRPCNetworkManager) SendRequestVote(
 		LastLogIndex: uint64(args.LastLogIndex),
 		LastLogTerm:  uint64(args.LastLogTerm),
 		IsPreVote:    args.IsPreVote,
+		GroupId:      groupID,
 	}
 
 	nm.logger.Debugw(
@@ -542,6 +687,15 @@ func (nm *gRPCNetworkManager) SendAppendEntries(
 	target types.NodeID,
 	args *types.AppendEntriesArgs,
 ) (*types.AppendEntriesReply, error) {
+	return nm.sendAppendEntries(ctx, target, "", args)
+}
+
+func (nm *gRPCNetworkManager) sendAppendEntries(
+	ctx context.Context,
+	target types.NodeID,
+	groupID string,
+	args *types.AppendEntriesArgs,
+) (*types.AppendEntriesReply, error) {
 	if nm.isShutdown.Load() {
 		return nil, ErrShuttingDown
 	}
@@ -583,6 +737,7 @@ func (nm *gRPCNetworkManager) SendAppendEntries(
 		PrevLogTerm:  uint64(args.PrevLogTerm),
 		Entries:      entries,
 		LeaderCommit: uint64(args.LeaderCommit),
+		GroupId:      groupID,
 	}
 
 	if !isHeartbeat {
@@ -707,6 +862,15 @@ func (nm *gRPCNetworkManager) SendInstallSnapshot(
 	target types.NodeID,
 	args *types.InstallSnapshotArgs,
 ) (*types.InstallSnapshotReply, error) {
+	return nm.sendInstallSnapshot(ctx, target, "", args)
+}
+
+func (nm *gRPCNetworkManager) sendInstallSnapshot(
+	ctx context.Context,
+	target types.NodeID,
+	groupID string,
+	args *types.InstallSnapshotArgs,
+) (*types.InstallSnapshotReply, error) {
 	if nm.isShutdown.Load() {
 		return nil, ErrShuttingDown
 	}
@@ -732,6 +896,7 @@ func (nm *gRPCNetworkManager) SendInstallSnapshot(
 		Data:              args.Data,
 		Offset:            args.Offset,
 		MoreChunks:        args.MoreChunks,
+		GroupId:           groupID,
 	}
 	dataSize := len(args.Data)
 
@@ -847,6 +1012,52 @@ func (nm *gRPCNetworkManager) PeerStatus(peer types.NodeID) (types.PeerConnectio
 	}, nil
 }
 
+// SendTimeoutNow sends a TimeoutNow RPC to a target peer to trigger an immediate election.
+func (nm *gRPCNetworkManager) SendTimeoutNow(
+	ctx context.Context,
+	target types.NodeID,
+	args *TimeoutNowArgs,
+) (*TimeoutNowReply, error) {
+	return nm.sendTimeoutNow(ctx, target, "", args)
+}
+
+func (nm *gRPCNetworkManager) sendTimeoutNow(
+	ctx context.Context,
+	target types.NodeID,
+	groupID string,
+	args *TimeoutNowArgs,
+) (*TimeoutNowReply, error) {
+	if nm.isShutdown.Load() {
+		return nil, ErrShuttingDown
+	}
+
+	client, err := nm.getOrCreatePeerClient(ctx, target)
+	if err != nil {
+		return nil, fmt.Errorf("SendTimeoutNow: failed to get client for peer %s: %w", target, err)
+	}
+
+	client.pendingOps.Add(1)
+	defer client.pendingOps.Add(-1)
+
+	req := &proto.TimeoutNowRequest{
+		Term:     uint64(args.Term),
+		LeaderId: string(args.LeaderID),
+		GroupId:  groupID,
+	}
+
+	resp, err := client.rpcClient().TimeoutNow(ctx, req)
+	if err != nil {
+		client.recordFailure(err)
+		return nil, formatGRPCError(err)
+	}
+
+	client.recordSuccess(nm.clock.Now())
+	return &TimeoutNowReply{
+		Term:    types.Term(resp.Term),
+		Success: resp.Success,
+	}, nil
+}
+
 // LocalAddr returns the network address the manager's server is listening on.
 func (nm *gRPCNetworkManager) LocalAddr() string {
 	if nm.listener != nil {
@@ -893,6 +1104,23 @@ type grpcServerHandler struct {
 	logger     logger.Logger
 }
 
+func (h *grpcServerHandler) resolveHandler(groupID string) (RPCHandler, error) {
+	if groupID == "" {
+		if !h.nm.multiGroup && h.rpcHandler != nil {
+			return h.rpcHandler, nil
+		}
+		return nil, status.Error(codes.InvalidArgument, "group_id is required")
+	}
+
+	h.nm.groupMu.RLock()
+	handler, ok := h.nm.groupHandlers[groupID]
+	h.nm.groupMu.RUnlock()
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "unknown raft group: %s", groupID)
+	}
+	return handler, nil
+}
+
 // RequestVote handles incoming RequestVote RPCs.
 func (h *grpcServerHandler) RequestVote(
 	ctx context.Context,
@@ -903,6 +1131,11 @@ func (h *grpcServerHandler) RequestVote(
 		h.logger.Debugw("Rejecting RPC: server shutting down", "rpc", rpc, "from", req.CandidateId)
 		h.nm.metrics.IncCounter("grpc_server_rpc_rejected_total", "rpc", rpc, "reason", "shutdown")
 		return nil, status.Error(codes.Aborted, "server shutting down")
+	}
+
+	handler, err := h.resolveHandler(req.GroupId)
+	if err != nil {
+		return nil, err
 	}
 
 	startTime := h.nm.clock.Now()
@@ -916,11 +1149,12 @@ func (h *grpcServerHandler) RequestVote(
 	}
 
 	h.logger.Debugw("Received RPC", "rpc", rpc,
+		"group_id", req.GroupId,
 		"from", args.CandidateID, "term", args.Term, "is_prevote", args.IsPreVote,
 		"last_log_index", args.LastLogIndex, "last_log_term", args.LastLogTerm)
 	h.nm.metrics.IncCounter("grpc_server_rpc_received_total", "rpc", rpc)
 
-	reply, err := h.rpcHandler.RequestVote(ctx, args)
+	reply, err := handler.RequestVote(ctx, args)
 	latency := h.nm.clock.Since(startTime)
 	h.nm.metrics.ObserveHistogram("grpc_server_rpc_latency_seconds", latency.Seconds(), "rpc", rpc)
 
@@ -1005,6 +1239,11 @@ func (h *grpcServerHandler) AppendEntries(
 		return nil, status.Error(codes.Aborted, "server shutting down")
 	}
 
+	handler, err := h.resolveHandler(req.GroupId)
+	if err != nil {
+		return nil, err
+	}
+
 	startTime := h.nm.clock.Now()
 
 	entries := make([]types.LogEntry, len(req.Entries))
@@ -1050,7 +1289,7 @@ func (h *grpcServerHandler) AppendEntries(
 		)
 	}
 
-	reply, err := h.rpcHandler.AppendEntries(ctx, args)
+	reply, err := handler.AppendEntries(ctx, args)
 	latency := h.nm.clock.Since(startTime)
 	h.nm.metrics.ObserveHistogram(
 		"grpc_server_rpc_latency_seconds",
@@ -1127,6 +1366,11 @@ func (h *grpcServerHandler) InstallSnapshot(
 		return nil, status.Error(codes.Aborted, "server shutting down")
 	}
 
+	handler, err := h.resolveHandler(req.GroupId)
+	if err != nil {
+		return nil, err
+	}
+
 	startTime := h.nm.clock.Now()
 	dataSize := len(req.Data)
 
@@ -1158,7 +1402,7 @@ func (h *grpcServerHandler) InstallSnapshot(
 	h.nm.metrics.IncCounter("grpc_server_rpc_received_total", "rpc", rpc)
 	h.nm.metrics.AddCounter("grpc_server_received_bytes_total", float64(dataSize), "rpc", rpc)
 
-	reply, err := h.rpcHandler.InstallSnapshot(ctx, args)
+	reply, err := handler.InstallSnapshot(ctx, args)
 	latency := h.nm.clock.Since(startTime)
 	h.nm.metrics.ObserveHistogram("grpc_server_rpc_latency_seconds", latency.Seconds(), "rpc", rpc)
 
@@ -1196,6 +1440,42 @@ func (h *grpcServerHandler) InstallSnapshot(
 // and attempts to establish a new one. This is useful for recovering from
 // persistent network errors where the gRPC client's internal reconnect
 // logic may not be sufficient.
+// TimeoutNow handles incoming TimeoutNow RPCs for leadership transfer.
+func (h *grpcServerHandler) TimeoutNow(
+	ctx context.Context,
+	req *proto.TimeoutNowRequest,
+) (*proto.TimeoutNowResponse, error) {
+	if h.nm.isShutdown.Load() {
+		return nil, status.Error(codes.Aborted, "server shutting down")
+	}
+
+	handler, err := h.resolveHandler(req.GroupId)
+	if err != nil {
+		return nil, err
+	}
+
+	tnHandler, ok := handler.(TimeoutNowHandler)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "handler does not support TimeoutNow")
+	}
+
+	reply, err := tnHandler.TimeoutNow(ctx, &TimeoutNowArgs{
+		Term:     types.Term(req.Term),
+		LeaderID: types.NodeID(req.LeaderId),
+	})
+	if err != nil {
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &proto.TimeoutNowResponse{
+		Term:    uint64(reply.Term),
+		Success: reply.Success,
+	}, nil
+}
+
 func (nm *gRPCNetworkManager) ResetConnection(ctx context.Context, peerID types.NodeID) error {
 	nm.mu.Lock()
 	defer nm.mu.Unlock()

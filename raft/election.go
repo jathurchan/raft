@@ -103,8 +103,10 @@ type electionManager struct {
 	rand              Rand
 	clock             Clock
 
-	electionTickCount   int     // Base number of ticks before an election timeout
-	randomizationFactor float64 // Randomization percentage to avoid election collisions
+	electionTickCount         int     // Base number of ticks before an election timeout
+	randomizationFactor       float64 // Randomization percentage to avoid election collisions
+	initialElectionDelayTicks int     // Optional deterministic initial election delay
+	initialDelayApplied       bool    // Tracks whether initial delay has been applied
 
 	electionElapsed  int // Ticks elapsed since last heartbeat
 	randomizedPeriod int // Randomized timeout threshold for current cycle
@@ -186,9 +188,10 @@ func NewElectionManager(deps ElectionManagerDeps) (ElectionManager, error) {
 		rand:              deps.Rand,
 		clock:             deps.Clock,
 
-		electionTickCount:   opts.ElectionTickCount,
-		preVoteEnabled:      deps.Config.FeatureFlags.EnablePreVote,
-		randomizationFactor: opts.ElectionRandomizationFactor,
+		electionTickCount:         opts.ElectionTickCount,
+		preVoteEnabled:            deps.Config.FeatureFlags.EnablePreVote,
+		randomizationFactor:       opts.ElectionRandomizationFactor,
+		initialElectionDelayTicks: opts.InitialElectionDelayTicks,
 
 		electionStartDelay: time.Duration(nodeBasedSeed%100)*time.Millisecond +
 			time.Duration(deps.Rand.IntN(100))*time.Millisecond,
@@ -240,6 +243,12 @@ func (em *electionManager) Initialize(ctx context.Context) error {
 	}
 
 	em.resetElectionTimeoutPeriod()
+	if em.initialElectionDelayTicks > 0 {
+		em.timerMu.Lock()
+		em.randomizedPeriod = em.electionTickCount + em.initialElectionDelayTicks
+		em.electionElapsed = 0
+		em.timerMu.Unlock()
+	}
 
 	em.logger.Infow("Election manager initialized",
 		"nodeID", em.id,
@@ -1208,6 +1217,21 @@ func (em *electionManager) isLogUpToDate(
 }
 
 // Stop stops the election manager and waits for any ongoing operations to finish.
+// StartImmediateElection triggers an immediate election without waiting for the election timeout.
+// Used during leadership transfer (TimeoutNow).
+func (em *electionManager) StartImmediateElection(ctx context.Context) {
+	if em.isShutdown.Load() {
+		return
+	}
+	if !em.electionInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	defer em.electionInFlight.Store(false)
+
+	em.electionState.Store(int32(ElectionStateVoting))
+	em.startElection(ctx)
+}
+
 func (em *electionManager) Stop() {
 	em.stopOnce.Do(func() {
 		em.logger.Infow("Stopping election manager", "nodeID", em.id)

@@ -96,6 +96,34 @@ type Raft interface {
 	//
 	// The channel remains open during normal operation and is closed after Stop() completes.
 	LeaderChangeChannel() <-chan types.NodeID
+
+	// TransferLeadership attempts to transfer leadership to the specified target peer.
+	// Returns ErrNotLeader if this node is not currently the leader, or ErrShuttingDown if shutting down.
+	TransferLeadership(ctx context.Context, target types.NodeID) error
+}
+
+// TimeoutNowArgs encapsulates the arguments for the TimeoutNow RPC used in leadership transfer.
+type TimeoutNowArgs struct {
+	Term     types.Term
+	LeaderID types.NodeID
+}
+
+// TimeoutNowReply encapsulates the reply for the TimeoutNow RPC.
+type TimeoutNowReply struct {
+	Term    types.Term
+	Success bool
+}
+
+// TimeoutNowSender is an optional interface implemented by NetworkManager implementations
+// that support sending TimeoutNow RPCs for leadership transfer.
+type TimeoutNowSender interface {
+	SendTimeoutNow(ctx context.Context, target types.NodeID, args *TimeoutNowArgs) (*TimeoutNowReply, error)
+}
+
+// TimeoutNowHandler is an optional interface implemented by RPCHandler implementations
+// that support handling TimeoutNow RPCs for leadership transfer.
+type TimeoutNowHandler interface {
+	TimeoutNow(ctx context.Context, args *TimeoutNowArgs) (*TimeoutNowReply, error)
 }
 
 // RPCHandler defines how a Raft node processes incoming RPCs from peers.

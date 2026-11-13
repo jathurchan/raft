@@ -26,6 +26,8 @@ message RequestVoteRequest {
     uint64 last_log_term = 4;
     // If true, this is a pre-vote request, not a formal vote request.
     bool is_pre_vote = 5;
+    // Target Raft group identifier for Multi-Raft multiplexing (empty for single-group mode).
+    string group_id = 6;
 }
 
 // RequestVoteResponse contains the results for the RequestVote RPC.
@@ -51,6 +53,8 @@ message AppendEntriesRequest {
     repeated LogEntry entries = 5;
     // Leader's commit index (highest log index known to be committed).
     uint64 leader_commit = 6;
+    // Target Raft group identifier for Multi-Raft multiplexing (empty for single-group mode).
+    string group_id = 7;
 }
 
 // AppendEntriesResponse contains the results for the AppendEntries RPC.
@@ -86,12 +90,33 @@ message InstallSnapshotRequest {
     uint64 offset = 6;
     // True if further chunks follow. Unset for a snapshot sent in one message.
     bool more_chunks = 7;
+    // Target Raft group identifier for Multi-Raft multiplexing (empty for single-group mode).
+    string group_id = 8;
 }
 
 // InstallSnapshotResponse contains the results for the InstallSnapshot RPC.
 message InstallSnapshotResponse {
     // Receiver's current term, for leader to update itself if necessary.
     uint64 term = 1;
+}
+
+// TimeoutNowRequest asks a target follower to immediately start an election
+// to take over leadership from the current leader.
+message TimeoutNowRequest {
+    // Leader's current term.
+    uint64 term = 1;
+    // ID of the leader initiating leadership transfer.
+    string leader_id = 2;
+    // Target Raft group identifier for Multi-Raft multiplexing.
+    string group_id = 3;
+}
+
+// TimeoutNowResponse contains the result of a TimeoutNow RPC.
+message TimeoutNowResponse {
+    // Receiver's current term.
+    uint64 term = 1;
+    // True if the receiver accepted the leadership transfer and started an election.
+    bool success = 2;
 }
 
 // Raft defines the gRPC service for Raft peer-to-peer communication.
@@ -106,4 +131,7 @@ service Raft {
     // InstallSnapshot is called by leaders to send snapshot chunks to followers
     // that are too far behind.
     rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+
+    // TimeoutNow triggers an immediate election on the target peer for leadership transfer.
+    rpc TimeoutNow(TimeoutNowRequest) returns (TimeoutNowResponse);
 }

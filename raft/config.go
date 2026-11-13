@@ -64,6 +64,11 @@ type Options struct {
 
 	// FetchEntriesTimeout sets a timeout for fetching log entries from a leader or peer.
 	FetchEntriesTimeout time.Duration
+
+	// InitialElectionDelayTicks adds a deterministic offset (in ticks) to the initial
+	// election timeout after startup, allowing Multi-Raft deployments to stagger initial
+	// leadership across nodes without manual intervention.
+	InitialElectionDelayTicks int
 }
 
 // FeatureFlags enables optional Raft features and optimizations.

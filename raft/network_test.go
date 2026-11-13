@@ -1384,6 +1384,14 @@ func (f *fakeRaftClient) RequestVote(
 	return &proto.RequestVoteResponse{Term: in.Term, VoteGranted: true}, nil
 }
 
+func (f *fakeRaftClient) TimeoutNow(
+	ctx context.Context,
+	in *proto.TimeoutNowRequest,
+	opts ...grpc.CallOption,
+) (*proto.TimeoutNowResponse, error) {
+	return &proto.TimeoutNowResponse{Term: in.Term, Success: true}, nil
+}
+
 func (f *fakeRaftClient) AppendEntries(
 	ctx context.Context,
 	in *proto.AppendEntriesRequest,
